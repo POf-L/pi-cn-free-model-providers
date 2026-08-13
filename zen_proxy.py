@@ -13,11 +13,14 @@ opencode 客户端 -> 本代理(替换会话标识, 周期性轮换) -> https://
 用法:
     python zen_proxy.py --port 8643 [--rotation 600]
     opencode.jsonc 中 opencode(Zen) provider baseURL 指向 http://127.0.0.1:8643/v1
+    上游默认自动走系统/环境代理(Windows 注册表 + HTTP(S)_PROXY), --direct 强制直连,
+    --proxy http(s)://host:port 可显式指定代理。
 
 SSE 流式响应实时透传。
 """
 
 import argparse
+import base64
 import json
 import os
 import random
@@ -27,6 +30,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import urllib.request
 from http.client import HTTPConnection, HTTPSConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -90,6 +94,8 @@ strip_headers = set()
 sanitize_body = True
 quiet = False
 inject_client = "cli"
+# 上游代理: ""=自动检测系统/环境代理, "direct"=强制直连, 其它=http(s)://host:port 显式指定
+proxy_setting = ""
 
 
 class ZenProxyHandler(BaseHTTPRequestHandler):
@@ -218,11 +224,54 @@ class ZenProxyHandler(BaseHTTPRequestHandler):
         print(" | ".join(parts), flush=True)
 
 
+def _resolve_proxy():
+    """解析上游代理设置。
+
+    返回 (host, port, ssl, headers) 表示经该代理 CONNECT 隧道转发;
+    返回 None 表示直连。
+    """
+    setting = proxy_setting
+    if setting == "direct":
+        return None
+    explicit = bool(setting)
+    url = setting
+    if not url:
+        proxies = urllib.request.getproxies()
+        url = proxies.get("https") or proxies.get("http") or ""
+    if not url:
+        return None
+    if not explicit and urllib.request.proxy_bypass(upstream_host):
+        return None
+    p = urllib.parse.urlsplit(url)
+    if not p.hostname:
+        return None
+    port = p.port or (443 if p.scheme == "https" else 8080)
+    headers = {}
+    if p.username:
+        cred = urllib.parse.unquote(p.username) + ":" + urllib.parse.unquote(p.password or "")
+        headers["Proxy-Authorization"] = "Basic " + base64.b64encode(cred.encode()).decode()
+    return p.hostname, port, p.scheme == "https", headers
+
+
 def _upstream_connection():
+    proxy = _resolve_proxy()
+    timeout = 600
+    if proxy is None:
+        if upstream_ssl:
+            return HTTPSConnection(upstream_host, upstream_port, timeout=timeout,
+                                   context=ssl.create_default_context())
+        return HTTPConnection(upstream_host, upstream_port, timeout=timeout)
+    host, port, ssl_proxy, headers = proxy
+    # 关键: 隧道连接类取决于"上游"是否 TLS(CONNECT 后需对上游再握手 TLS),
+    # 而非代理自身是否 TLS —— http 代理只做明文 CONNECT 转发,
+    # 对 https 上游必须用 HTTPSConnection, 否则明文请求打到 443 会得 400。
     if upstream_ssl:
-        return HTTPSConnection(upstream_host, upstream_port, timeout=600,
+        conn = HTTPSConnection(host, port, timeout=timeout,
                                context=ssl.create_default_context())
-    return HTTPConnection(upstream_host, upstream_port, timeout=600)
+    else:
+        conn = HTTPConnection(host, port, timeout=timeout)
+    conn.set_tunnel(upstream_host, upstream_port, headers=headers or None)
+    return conn
 
 
 def main():
@@ -244,10 +293,14 @@ def main():
                         help="do not log per-request lines")
     parser.add_argument("--inject-client", default="cli",
                         help="x-opencode-client value to inject when missing (empty = disable)")
+    parser.add_argument("--proxy", default="",
+                        help="upstream proxy: 留空=自动检测系统/环境代理, 'direct'=强制直连, 或 http(s)://host:port 显式指定")
+    parser.add_argument("--direct", action="store_true",
+                        help="force direct connection, ignore system proxy")
     args = parser.parse_args()
 
     global upstream_host, upstream_port, upstream_prefix, upstream_ssl
-    global identity_mapper, rewrite_enabled, strip_headers, sanitize_body, quiet, inject_client
+    global identity_mapper, rewrite_enabled, strip_headers, sanitize_body, quiet, inject_client, proxy_setting
     upstream_host = args.upstream_host
     upstream_port = args.upstream_port
     upstream_prefix = args.upstream_prefix
@@ -258,6 +311,7 @@ def main():
     sanitize_body = not args.no_sanitize_body
     quiet = args.quiet
     inject_client = args.inject_client
+    proxy_setting = "direct" if args.direct else args.proxy
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), ZenProxyHandler)
     print(f"MAIN STARTED port={args.port} pid={os.getpid()}", file=sys.stderr, flush=True)
@@ -266,6 +320,11 @@ def main():
     print(f"rewrite enabled: {rewrite_enabled}, rotation: {args.rotation}s, body sanitize: {sanitize_body}")
     print(f"inject x-opencode-client when missing: {inject_client or '(disabled)'}")
     print(f"rewritten headers: {sorted(DEFAULT_REWRITE_HEADERS)}")
+    proxy = _resolve_proxy()
+    if proxy is None:
+        print("upstream route: direct (no system proxy in use)")
+    else:
+        print(f"upstream route: via {'https' if proxy[2] else 'http'} proxy {proxy[0]}:{proxy[1]}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

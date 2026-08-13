@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+
+# 运行日志
+*.log
+*.log.err
