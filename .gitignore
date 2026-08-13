@@ -1,6 +1,10 @@
+# Python
 __pycache__/
 *.pyc
 
 # 运行日志
 *.log
 *.log.err
+
+# 调试残留
+*.der

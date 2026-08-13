@@ -9,12 +9,14 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM Inject upstream proxy so zen_proxy forwards via system proxy (v2ray/clash 10808)
+REM 经本机代理端口(v2ray/clash 10808)访问上游, 出口 IP 走本机代理
 if "%HTTP_PROXY%"=="" set HTTP_PROXY=http://127.0.0.1:10808
 if "%HTTPS_PROXY%"=="" set HTTPS_PROXY=http://127.0.0.1:10808
 
+REM 上游直连 opencode.ai (zen_proxy.py 默认), 无额外出口 Worker
+
 echo Starting Zen clean proxy: http://127.0.0.1:8643 -^> https://opencode.ai/zen/v1
-echo Session-id rewriting + rotation every 10min. Ctrl+C to stop.
+echo Session-id rewriting + per-request random ids. Ctrl+C to stop.
 echo Upstream proxy: %HTTPS_PROXY%
 echo.
 python zen_proxy.py --port 8643
