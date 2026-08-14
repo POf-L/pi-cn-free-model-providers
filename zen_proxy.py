@@ -4,8 +4,8 @@ opencode 客户端 -> 本代理(替换会话标识, 每请求随机) -> https://
 
 策略:
     - 识别现有会话标识头, 用假标识替换, 不剥离
-    - 不做真实 -> 假标识的映射/记录, 每次请求一律随机生成全新假标识
-    - 不保留任何真实会话信息, 上游无法据此关联请求
+    - 同一会话在轮换窗口内映射到同一假标识(不同会话互不相同), 保持请求关联性
+    - 默认每 10 分钟整批轮换一次, 窗口结束后生成全新假标识(--rotate-seconds 调整)
     - 保留 x-opencode-client, 避免 Zen 将请求识别为匿名客户端而被限流
 
 用法:
@@ -25,6 +25,7 @@ import random
 import ssl
 import string
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -64,6 +65,28 @@ inject_client = "cli"
 proxy_setting = ""
 # 额外注入的请求头, 形如 "Name: value"(可由 --extra-header 多次指定)
 extra_headers = []
+# 假标识轮换窗口(秒): 窗口内同一会话映射同一假标识, 到期后整批轮换
+rotate_seconds = 600
+# (头名, 原始值) -> 假标识 的映射与批次起始时间, 由 _rewrite_lock 保护
+_rewrite_lock = threading.Lock()
+_rewrite_map = {}
+_rewrite_batch_started = time.time()
+
+
+def _rewrite_session_id(lkey, original):
+    """窗口内复用同一假标识, 到期后清空映射重新随机。"""
+    global _rewrite_batch_started
+    now = time.time()
+    with _rewrite_lock:
+        if now - _rewrite_batch_started >= rotate_seconds:
+            _rewrite_map.clear()
+            _rewrite_batch_started = now
+        key = (lkey, original)
+        fake = _rewrite_map.get(key)
+        if fake is None:
+            fake = random_id(DEFAULT_REWRITE_HEADERS[lkey])
+            _rewrite_map[key] = fake
+        return fake
 
 
 class ZenProxyHandler(BaseHTTPRequestHandler):
@@ -100,7 +123,7 @@ class ZenProxyHandler(BaseHTTPRequestHandler):
             if lkey in HOP_HEADERS or lkey in strip_headers:
                 continue
             if rewrite_enabled and lkey in DEFAULT_REWRITE_HEADERS:
-                value = random_id(DEFAULT_REWRITE_HEADERS[lkey])
+                value = _rewrite_session_id(lkey, value)
             headers[key] = value
 
         if inject_client and "x-opencode-client" not in headers:
@@ -249,6 +272,8 @@ def main():
                         help="do not log per-request lines")
     parser.add_argument("--inject-client", default="cli",
                         help="x-opencode-client value to inject when missing (empty = disable)")
+    parser.add_argument("--rotate-seconds", type=int, default=600,
+                        help="fake-id rotation window in seconds; same session keeps one id within a window (default 600)")
     parser.add_argument("--extra-header", action="append", default=[],
                         help="inject extra request header 'Name: value' (repeatable), e.g. 'x-egress-token: xxx'")
     parser.add_argument("--proxy", default="",
@@ -258,7 +283,7 @@ def main():
     args = parser.parse_args()
 
     global upstream_host, upstream_port, upstream_prefix, upstream_ssl
-    global rewrite_enabled, strip_headers, sanitize_body, quiet, inject_client, proxy_setting, extra_headers
+    global rewrite_enabled, strip_headers, sanitize_body, quiet, inject_client, proxy_setting, extra_headers, rotate_seconds
     upstream_host = args.upstream_host
     upstream_port = args.upstream_port
     upstream_prefix = args.upstream_prefix
@@ -270,12 +295,13 @@ def main():
     inject_client = args.inject_client
     proxy_setting = "direct" if args.direct else args.proxy
     extra_headers = args.extra_header
+    rotate_seconds = max(1, args.rotate_seconds)
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), ZenProxyHandler)
     print(f"MAIN STARTED port={args.port} pid={os.getpid()}", file=sys.stderr, flush=True)
     scheme = "https" if upstream_ssl else "http"
     print(f"zen identity proxy on http://127.0.0.1:{args.port} -> {scheme}://{upstream_host}:{upstream_port}{upstream_prefix}")
-    print(f"rewrite enabled: {rewrite_enabled}, per-request random ids, body sanitize: {sanitize_body}")
+    print(f"rewrite enabled: {rewrite_enabled}, per-session stable ids rotated every {rotate_seconds}s, body sanitize: {sanitize_body}")
     print(f"inject x-opencode-client when missing: {inject_client or '(disabled)'}")
     print(f"extra headers injected: {extra_headers or '(none)'}")
     print(f"rewritten headers: {sorted(DEFAULT_REWRITE_HEADERS)}")

@@ -8,3 +8,6 @@ __pycache__/
 
 # 调试残留
 *.der
+
+# 无关依赖残留
+node_modules/
