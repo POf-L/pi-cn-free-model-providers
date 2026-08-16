@@ -39,16 +39,24 @@ pi install npm:pi-opencode-native
 
 ### 1. API key
 
-在 `~/.pi/agent/auth.json` 添加（`public` 是 Zen 匿名 key，有账号可换自己的 key）：
+key 解析优先级（从高到低）：
 
-```json
-{
-  "opencode-fix": {
-    "type": "api_key",
-    "key": "public"
-  }
-}
+1. **环境变量 `OPENCODE_API_KEY`**（推荐，不把 key 写进配置文件）
+2. `~/.pi/agent/auth.json` 中 `opencode-fix.key`（**非** `public` 的值）
+3. 兜底匿名 `public`
+
+```bash
+# 方式 A：环境变量（推荐，账号 key）
+export OPENCODE_API_KEY=sk-xxx
+
+# 方式 B：auth.json（public = 匿名）
+cat ~/.pi/agent/auth.json
+# { "opencode-fix": { "type": "api_key", "key": "public" } }
 ```
+
+> ⚠️ auth.json 中 `key: "public"` 是匿名占位，会被忽略（走兜底）；要指定账号 key 请用环境变量或把 `public` 换成真实 key。
+>
+> ⚠️ **不要删除 auth.json 中的 `opencode-fix` 条目**——pi 在找不到该 provider 的 key 时会直接跳过这个扩展（failover 到内置 provider），导致扩展完全不生效。
 
 ### 2. 默认 provider（可选，推荐）
 
@@ -96,6 +104,7 @@ TUI 内 **Ctrl+P** 循环切换模型。
 4. **数据条款**：免费模型的免费期内，**提交的数据可能被用于改进模型**（官方隐私声明明确例外）。切勿发送敏感/机密内容。`nemotron-*` 为 NVIDIA 试用端点，禁止提交个人或机密数据，会话会被记录。
 5. **免费是限时的**：官方措辞为 "available for a limited time"，模型可能随时下架、改名或转为付费，不适合作为生产依赖。
 6. **单文件可审计**：整个扩展就是一个 `.mjs` 文件，使用前建议通读确认无异常行为。
+7. **代理会导致 500**：Zen API 请求**不能走 HTTP 代理**（实测经 v2rayN/Clash 等代理转发返回 500 Internal server error，直连正常）。若系统全局代理已开启（Windows WinINET），node/bun 的 fetch 默认不读系统代理所以不受影响，但请勿为此扩展显式设置 `HTTPS_PROXY`/`HTTP_PROXY` 环境变量指向代理。
 
 ## License
 

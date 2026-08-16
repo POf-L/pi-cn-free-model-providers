@@ -306,10 +306,12 @@ async function run(stream, output, model, context, options) {
       ...(tools && tools.length > 0 ? { tools } : {}),
       ...(options?.maxTokens ? { max_tokens: options.maxTokens } : { max_tokens: 128000 }),
     };
+    const effectiveKey = process.env.OPENCODE_API_KEY
+      ?? (options?.apiKey && options.apiKey !== "public" ? options.apiKey : "public");
     const headers = {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
-      Authorization: `Bearer ${options?.apiKey ?? "public"}`,
+      Authorization: `Bearer ${effectiveKey}`,
       ...OPENCODE_STATIC_HEADERS,
       "x-opencode-session": SESSION_ID,
       "x-opencode-request": generateOpenCodeId("msg_"),
