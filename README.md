@@ -96,6 +96,39 @@ pi --model opencode-fix/hy3-free
 
 TUI 内 **Ctrl+P** 循环切换模型。
 
+## 额外供应商：SenseNova（商汤日日新）
+
+本扩展同时注册了 **`sensenova`** provider，接入[商汤日日新平台](https://platform.sensenova.cn/)的 OpenAI 兼容网关（`https://token.sensenova.cn/v1`），免费公测套餐可用（每模型 1,500 次调用 / 5 小时）。
+
+### 配置
+
+```bash
+# 在 https://platform.sensenova.cn/console/keys 申请 key
+export SENSENOVA_API_KEY=sk-xxx
+```
+
+auth.json 中预置 `sensenova` 占位条目（`key: "public"`），同 `opencode-fix` 一样**不要删除**——pi 找不到该 provider 的 key 时会直接跳过扩展。
+
+### 可用模型
+
+| 模型 ID | 说明 | 限额 |
+|---|---|---|
+| `sensenova-6.7-flash-lite` | 轻量多模态智能体（文本+图像） | 1,500 次 / 5h |
+| `deepseek-v4-flash` | DeepSeek 高性能对话（走 SenseNova 网关） | 150 次 / 5h |
+
+### 使用
+
+```bash
+pi -p --provider sensenova --model sensenova/sensenova-6.7-flash-lite "你好"
+pi --provider sensenova --model sensenova/deepseek-v4-flash
+```
+
+### SenseNova 特有的坑（已内置处理）
+
+网关 schema 比 OpenAI 更严，**官方参数表未列出的字段一律拒收**（报错被替换成无信息量的 `Errors in message queue response`）。扩展内置 `cleanBody` 已处理：合并多条 `system` 消息、删除 `assistant.content: null`；`max_tokens` 上限 65,536（模型注册即设好）、上下文 256K。
+
+注意：`sensenova-u1-fast` 是**图像生成专用**模型（走 `/v1/images/generations`），与 chat completions 不兼容，本扩展不支持。
+
 ## 注意事项
 
 1. **模型歧义**：若机器上也配置了 pi 内置 `opencode` provider 且带 key，裸 `--model deepseek-v4-flash-free` 会报 "ambiguous across providers"。解决：显式 `--provider opencode-fix`，或删除内置 opencode 的 key，或将 defaultProvider 设为 `opencode-fix`。

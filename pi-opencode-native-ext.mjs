@@ -289,35 +289,86 @@ function streamOpenCode(model, context, options) {
     stopReason: "stop",
     timestamp: Date.now(),
   };
-  run(stream, output, model, context, options);
+  run(stream, output, model, context, options, {
+    url: "https://opencode.ai/zen/v1/chat/completions",
+    key: () => process.env.OPENCODE_API_KEY
+      ?? (options?.apiKey && options.apiKey !== "public" ? options.apiKey : "public"),
+    headers: () => ({
+      ...OPENCODE_STATIC_HEADERS,
+      "x-opencode-session": SESSION_ID,
+      "x-opencode-request": generateOpenCodeId("msg_"),
+    }),
+    maxTokens: 128000,
+  });
   return stream;
 }
 
-async function run(stream, output, model, context, options) {
+// SenseNova (商汤日日新) — OpenAI-compatible gateway with a strict schema.
+// https://platform.sensenova.cn/docs — only listed fields are accepted;
+// response_format is rejected, multiple system messages must be merged,
+// assistant.content:null must be dropped, max_tokens <= 65536.
+function streamSenseNova(model, context, options) {
+  const stream = new AssistantMessageEventStream();
+  const output = {
+    role: "assistant",
+    content: [],
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: "stop",
+    timestamp: Date.now(),
+  };
+  run(stream, output, model, context, options, {
+    url: "https://token.sensenova.cn/v1/chat/completions",
+    key: () => process.env.SENSENOVA_API_KEY
+      ?? (options?.apiKey && options.apiKey !== "public" ? options.apiKey : undefined),
+    headers: () => ({}),
+    maxTokens: 65536,
+    cleanBody: (body) => {
+      // Merge consecutive system messages into one (gateway rejects multiples)
+      const msgs = body.messages ?? [];
+      const merged = [];
+      for (const m of msgs) {
+        const last = merged[merged.length - 1];
+        if (m.role === "system" && last?.role === "system") {
+          last.content = `${last.content}\n\n${m.content}`;
+        } else {
+          merged.push({ ...m });
+        }
+      }
+      // Drop assistant.content:null (gateway treats null content as invalid)
+      for (const m of merged) {
+        if (m.role === "assistant" && m.content === null) delete m.content;
+      }
+      return { ...body, messages: merged };
+    },
+  });
+  return stream;
+}
+
+async function run(stream, output, model, context, options, cfg) {
   const state = { output, stream, contentBlockIndex: -1, thinkingBlockIndex: -1, toolCallsState: [] };
   try {
     const messages = normalizeMessages(context.messages ?? []);
     const tools = normalizeTools(context.tools);
-    const body = {
+    let body = {
       model: model.id,
       messages,
       stream: true,
       stream_options: { include_usage: true },
       ...(tools && tools.length > 0 ? { tools } : {}),
-      ...(options?.maxTokens ? { max_tokens: options.maxTokens } : { max_tokens: 128000 }),
+      ...(options?.maxTokens ? { max_tokens: options.maxTokens } : { max_tokens: cfg.maxTokens }),
     };
-    const effectiveKey = process.env.OPENCODE_API_KEY
-      ?? (options?.apiKey && options.apiKey !== "public" ? options.apiKey : "public");
+    if (cfg.cleanBody) body = cfg.cleanBody(body);
     const headers = {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
-      Authorization: `Bearer ${effectiveKey}`,
-      ...OPENCODE_STATIC_HEADERS,
-      "x-opencode-session": SESSION_ID,
-      "x-opencode-request": generateOpenCodeId("msg_"),
+      Authorization: `Bearer ${cfg.key()}`,
+      ...(cfg.headers ? cfg.headers() : {}),
     };
     stream.push({ type: "start", partial: output });
-    const response = await fetch("https://opencode.ai/zen/v1/chat/completions", {
+    const response = await fetch(cfg.url, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
@@ -325,7 +376,7 @@ async function run(stream, output, model, context, options) {
     });
     if (!response.ok) {
       const errText = await response.text();
-      throw new Error(`OpenCode API request failed: ${response.status} ${response.statusText}. ${errText.slice(0, 300)}`);
+      throw new Error(`${model.provider} API request failed: ${response.status} ${response.statusText}. ${errText.slice(0, 300)}`);
     }
     const reader = response.body.getReader();
     await consumeSSEStream(state, reader);
@@ -419,6 +470,34 @@ export default async function (pi) {
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 200000,
         maxTokens: 128000,
+      },
+    ],
+  });
+  pi.registerProvider("sensenova", {
+    name: "SenseNova (商汤日日新)",
+    baseUrl: "https://token.sensenova.cn/v1",
+    api: "openai-completions",
+    streamSimple: streamSenseNova,
+    models: [
+      {
+        id: "sensenova-6.7-flash-lite",
+        name: "SenseNova 6.7 Flash-Lite",
+        api: "openai-completions",
+        reasoning: true,
+        input: ["text", "image"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 252000,
+        maxTokens: 65536,
+      },
+      {
+        id: "deepseek-v4-flash",
+        name: "DeepSeek V4 Flash (via SenseNova)",
+        api: "openai-completions",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 252000,
+        maxTokens: 65536,
       },
     ],
   });
