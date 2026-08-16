@@ -9,6 +9,8 @@ const BAT_PATH = "D:\\项目\\opencode\\start_clean_proxy.bat"
 const START_TIMEOUT_MS = 60_000
 const POLL_MS = 300
 const LOG_PATH = "D:\\WindowsTemp\\opencode\\zen-proxy-start.log"
+const OFFICIAL_PROVIDER_ID = "opencode"
+const ZENPROXY_MODEL_ID = "big-pickle"
 
 function log(msg: string) {
   try {
@@ -71,12 +73,58 @@ function ensureZenProxy(): Promise<boolean> {
   return ensurePromise
 }
 
-export default (async () => {
+export default (async ({ client }) => {
+  const failedOver = new Set<string>()
+
   return {
     "chat.params": async (input) => {
       if (input.model.providerID !== PROVIDER_ID) return
       log(`zenproxy request from agent=${input.agent}`)
       await ensureZenProxy()
+    },
+    "chat.message": async (input, output) => {
+      const msg = output.message as unknown as {
+        providerID: string
+        parentID?: string
+        error?: { name?: string; data?: { statusCode?: number; message?: string } }
+      }
+      if (msg.providerID !== OFFICIAL_PROVIDER_ID) return
+      const err = msg.error
+      if (err?.name !== "APIError" || err.data?.statusCode !== 429) return
+      if (failedOver.has(input.sessionID)) return
+      if (!msg.parentID) return
+      let text = ""
+      try {
+        const parent = await client.session.message({
+          path: { id: input.sessionID, messageID: msg.parentID },
+        })
+        text = (parent.parts as { type: string; text?: string }[])
+          .filter((p) => p.type === "text" && p.text)
+          .map((p) => p.text as string)
+          .join("\n")
+      } catch (e) {
+        log(`429 failover: failed to read parent message: ${e}`)
+        return
+      }
+      if (!text) {
+        log("429 failover: parent message has no text parts, skipping")
+        return
+      }
+      await ensureZenProxy()
+      failedOver.add(input.sessionID)
+      try {
+        await client.session.promptAsync({
+          path: { id: input.sessionID },
+          body: {
+            model: { providerID: PROVIDER_ID, modelID: ZENPROXY_MODEL_ID },
+            parts: [{ type: "text", text }],
+          },
+        })
+        log(`429 failover -> zenproxy for session=${input.sessionID}`)
+      } catch (e) {
+        log(`429 failover: promptAsync failed: ${e}`)
+        failedOver.delete(input.sessionID)
+      }
     },
   }
 }) satisfies Plugin
