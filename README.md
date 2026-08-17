@@ -96,20 +96,22 @@ pi --model opencode-fix/hy3-free
 
 TUI 内 **Ctrl+P** 循环切换模型。
 
-## 额外供应商：SenseNova（商汤日日新）
+## 额外供应商
 
-本扩展同时注册了 **`sensenova`** provider，接入[商汤日日新平台](https://platform.sensenova.cn/)的 OpenAI 兼容网关（`https://token.sensenova.cn/v1`），免费公测套餐可用（每模型 1,500 次调用 / 5 小时）。
+除 Zen 免费模型外，本扩展还注册了 **4 个第三方免费/低成本供应商**。所有 provider 的 key 解析优先级一致：环境变量 → auth.json 中非 `public` 的 key → 匿名占位（`key: "public"` 会被忽略）。auth.json 中相应条目**不要删除**——pi 找不到该 provider 的 key 时会直接跳过扩展。
 
-### 配置
+### SenseNova（商汤日日新）
+
+接入[商汤日日新平台](https://platform.sensenova.cn/)的 OpenAI 兼容网关（`https://token.sensenova.cn/v1`），免费公测套餐可用（每模型 1,500 次调用 / 5 小时）。
+
+#### 配置
 
 ```bash
 # 在 https://platform.sensenova.cn/console/keys 申请 key
 export SENSENOVA_API_KEY=sk-xxx
 ```
 
-auth.json 中预置 `sensenova` 占位条目（`key: "public"`），同 `opencode-fix` 一样**不要删除**——pi 找不到该 provider 的 key 时会直接跳过扩展。
-
-### 可用模型
+#### 可用模型
 
 （数据源：[平台文档](https://platform.sensenova.cn/docs)，`GET /v1/models` 权威返回；全部 `pricing=0` 免费，`businesses: tokenplan + metered`）
 
@@ -122,22 +124,16 @@ auth.json 中预置 `sensenova` 占位条目（`key: "public"`），同 `opencod
 
 > `sensenova-u1-fast` 为**图像生成专用**（`output_modalities: image`，走 `/v1/images/generations`），与 chat completions 不兼容，未注册。
 
-### 使用
+#### 使用
 
 ```bash
 pi -p --provider sensenova --model sensenova/sensenova-6.7-flash-lite "你好"
 pi --provider sensenova --model sensenova/deepseek-v4-flash
 ```
 
-### SenseNova 特有的坑（已内置处理）
+#### SenseNova 特有的坑（已内置处理）
 
 网关 schema 比 OpenAI 更严，**官方参数表未列出的字段一律拒收**（报错被替换成无信息量的 `Errors in message queue response`）。扩展内置 `cleanBody` 已处理：合并多条 `system` 消息、删除 `assistant.content: null`；`max_tokens` 上限 65,536（模型注册即设好）、上下文 256K。
-
-注意：`sensenova-u1-fast` 是**图像生成专用**模型（走 `/v1/images/generations`），与 chat completions 不兼容，本扩展不支持。
-
-## 额外供应商：硅基流动 / 魔塔社区 / NVIDIA NIM
-
-本扩展额外注册了三个标准 OpenAI 兼容供应商，无需特殊消息清洗，`streamSimple` 基于通用工厂。
 
 ### 硅基流动 (SiliconFlow)
 
