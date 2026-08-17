@@ -276,10 +276,9 @@ async function consumeSSEStream(state, reader) {
   }
 }
 
-// ── Main streamSimple ──
-function streamOpenCode(model, context, options) {
-  const stream = new AssistantMessageEventStream();
-  const output = {
+// ── Shared output factory ──
+function makeOutput(model) {
+  return {
     role: "assistant",
     content: [],
     api: model.api,
@@ -289,6 +288,29 @@ function streamOpenCode(model, context, options) {
     stopReason: "stop",
     timestamp: Date.now(),
   };
+}
+
+// Factory for standard OpenAI-compatible providers (no special headers/schema).
+function makeOpenAIStream(baseUrl, envKey, opts = {}) {
+  return function streamSimple(model, context, options) {
+    const stream = new AssistantMessageEventStream();
+    const output = makeOutput(model);
+    const cfg = {
+      url: `${baseUrl.replace(/\/+$/, "")}/chat/completions`,
+      key: () => process.env[envKey] ?? (options?.apiKey && options.apiKey !== "public" ? options.apiKey : undefined),
+      headers: () => ({}),
+      maxTokens: opts.maxTokens ?? 128000,
+    };
+    if (opts.cleanBody) cfg.cleanBody = opts.cleanBody;
+    run(stream, output, model, context, options, cfg);
+    return stream;
+  };
+}
+
+// ── Main streamSimple ──
+function streamOpenCode(model, context, options) {
+  const stream = new AssistantMessageEventStream();
+  const output = makeOutput(model);
   run(stream, output, model, context, options, {
     url: "https://opencode.ai/zen/v1/chat/completions",
     key: () => process.env.OPENCODE_API_KEY
@@ -307,45 +329,30 @@ function streamOpenCode(model, context, options) {
 // https://platform.sensenova.cn/docs — only listed fields are accepted;
 // response_format is rejected, multiple system messages must be merged,
 // assistant.content:null must be dropped, max_tokens <= 65536.
-function streamSenseNova(model, context, options) {
-  const stream = new AssistantMessageEventStream();
-  const output = {
-    role: "assistant",
-    content: [],
-    api: model.api,
-    provider: model.provider,
-    model: model.id,
-    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-    stopReason: "stop",
-    timestamp: Date.now(),
-  };
-  run(stream, output, model, context, options, {
-    url: "https://token.sensenova.cn/v1/chat/completions",
-    key: () => process.env.SENSENOVA_API_KEY
-      ?? (options?.apiKey && options.apiKey !== "public" ? options.apiKey : undefined),
-    headers: () => ({}),
-    maxTokens: 65536,
-    cleanBody: (body) => {
-      // Merge consecutive system messages into one (gateway rejects multiples)
-      const msgs = body.messages ?? [];
-      const merged = [];
-      for (const m of msgs) {
-        const last = merged[merged.length - 1];
-        if (m.role === "system" && last?.role === "system") {
-          last.content = `${last.content}\n\n${m.content}`;
-        } else {
-          merged.push({ ...m });
-        }
+const streamSenseNova = makeOpenAIStream("https://token.sensenova.cn/v1", "SENSENOVA_API_KEY", {
+  maxTokens: 65536,
+  cleanBody: (body) => {
+    const msgs = body.messages ?? [];
+    const merged = [];
+    for (const m of msgs) {
+      const last = merged[merged.length - 1];
+      if (m.role === "system" && last?.role === "system") {
+        last.content = `${last.content}\n\n${m.content}`;
+      } else {
+        merged.push({ ...m });
       }
-      // Drop assistant.content:null (gateway treats null content as invalid)
-      for (const m of merged) {
-        if (m.role === "assistant" && m.content === null) delete m.content;
-      }
-      return { ...body, messages: merged };
-    },
-  });
-  return stream;
-}
+    }
+    for (const m of merged) {
+      if (m.role === "assistant" && m.content === null) delete m.content;
+    }
+    return { ...body, messages: merged };
+  },
+});
+
+// Standard OpenAI-compatible providers
+const streamSiliconFlow = makeOpenAIStream("https://api.siliconflow.cn/v1", "SILICONFLOW_API_KEY");
+const streamModelScope = makeOpenAIStream("https://api-inference.modelscope.cn/v1", "MODELSCOPE_API_KEY");
+const streamNvidia = makeOpenAIStream("https://integrate.api.nvidia.com/v1", "NVIDIA_NIM_API_KEY");
 
 async function run(stream, output, model, context, options, cfg) {
   const state = { output, stream, contentBlockIndex: -1, thinkingBlockIndex: -1, toolCallsState: [] };
@@ -518,6 +525,90 @@ export default async function (pi) {
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 1048576,
         maxTokens: 131072,
+      },
+    ],
+  });
+  pi.registerProvider("siliconflow", {
+    name: "硅基流动 (SiliconFlow)",
+    baseUrl: "https://api.siliconflow.cn/v1",
+    api: "openai-completions",
+    streamSimple: streamSiliconFlow,
+    models: [
+      {
+        id: "nex-agi/Nex-N2-Pro",
+        name: "Nex-N2-Pro (397B MoE, 免费)",
+        api: "openai-completions",
+        reasoning: true,
+        input: ["text", "image"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 262144,
+        maxTokens: 65536,
+      },
+      {
+        id: "Qwen/Qwen3-8B",
+        name: "Qwen3-8B (免费)",
+        api: "openai-completions",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 262144,
+        maxTokens: 65536,
+      },
+    ],
+  });
+  pi.registerProvider("modelscope", {
+    name: "魔塔社区 (ModelScope)",
+    baseUrl: "https://api-inference.modelscope.cn/v1",
+    api: "openai-completions",
+    streamSimple: streamModelScope,
+    models: [
+      {
+        id: "deepseek-ai/DeepSeek-V4-Pro",
+        name: "DeepSeek V4 Pro (via ModelScope)",
+        api: "openai-completions",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 1048576,
+        maxTokens: 65536,
+      },
+      {
+        id: "deepseek-ai/DeepSeek-R1",
+        name: "DeepSeek R1 (via ModelScope)",
+        api: "openai-completions",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 1048576,
+        maxTokens: 65536,
+      },
+      {
+        id: "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+        name: "Qwen3-Coder-480B (via ModelScope)",
+        api: "openai-completions",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 262144,
+        maxTokens: 65536,
+      },
+    ],
+  });
+  pi.registerProvider("nvidia", {
+    name: "NVIDIA NIM",
+    baseUrl: "https://integrate.api.nvidia.com/v1",
+    api: "openai-completions",
+    streamSimple: streamNvidia,
+    models: [
+      {
+        id: "openai/gpt-oss-120b",
+        name: "GPT-OSS 120B (via NVIDIA NIM)",
+        api: "openai-completions",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 131072,
+        maxTokens: 65536,
       },
     ],
   });

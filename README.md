@@ -135,6 +135,63 @@ pi --provider sensenova --model sensenova/deepseek-v4-flash
 
 注意：`sensenova-u1-fast` 是**图像生成专用**模型（走 `/v1/images/generations`），与 chat completions 不兼容，本扩展不支持。
 
+## 额外供应商：硅基流动 / 魔塔社区 / NVIDIA NIM
+
+本扩展额外注册了三个标准 OpenAI 兼容供应商，无需特殊消息清洗，`streamSimple` 基于通用工厂。
+
+### 硅基流动 (SiliconFlow)
+
+国内直连，编码模型强。Nex-N2-Pro（397B MoE，SWE-Bench 80.8）**完全免费**。
+
+```bash
+# 在 https://cloud.siliconflow.cn 注册实名，获取 key
+export SILICONFLOW_API_KEY=sk-xxx
+
+# 使用
+pi -p --provider siliconflow --model siliconflow/nex-agi/Nex-N2-Pro "你好"
+```
+
+| 模型 ID | 说明 | 上下文 | 限额 |
+|---|---|---|---|
+| `nex-agi/Nex-N2-Pro` | Nex-N2-Pro (397B MoE，编码≈GPT-5.5，文本+图像) | 256K | 免费 |
+| `Qwen/Qwen3-8B` | Qwen3-8B 通用对话 | 256K | 免费 |
+
+### 魔塔社区 (ModelScope)
+
+阿里达摩院旗下，一个 Key 同时兼容 OpenAI + Anthropic 双协议，每日 2000 次免费调用。
+
+```bash
+# 在 https://modelscope.cn 注册，绑定阿里云账号+实名，获取 SDK Token
+export MODELSCOPE_API_KEY=ms-xxx
+
+# 使用
+pi -p --provider modelscope --model modelscope/deepseek-ai/DeepSeek-V4-Pro "你好"
+```
+
+| 模型 ID | 说明 | 上下文 | 限额 |
+|---|---|---|---|
+| `deepseek-ai/DeepSeek-V4-Pro` | DeepSeek V4 Pro 强推理 | 1M | 2000 次/天 |
+| `deepseek-ai/DeepSeek-R1` | DeepSeek R1 推理模型 | 1M | 2000 次/天 |
+| `Qwen/Qwen3-Coder-480B-A35B-Instruct` | Qwen3 Coder 480B MoE | 256K | 2000 次/天 |
+
+### NVIDIA NIM
+
+NVIDIA 官方推理平台，无需信用卡，40 RPM，无每日总量上限。
+
+```bash
+# 在 https://build.nvidia.com 注册获取 key
+export NVIDIA_NIM_API_KEY=nvapi-xxx
+
+# 使用
+pi -p --provider nvidia --model nvidia/openai/gpt-oss-120b "你好"
+```
+
+| 模型 ID | 说明 | 上下文 | 限额 |
+|---|---|---|---|
+| `openai/gpt-oss-120b` | OpenAI 开源权重模型 | 128K | 无每日上限 |
+
+> 更多模型可通过 `GET /v1/models` 查询（需有效 key），模型更新频繁，以官网为准。
+
 ## opencode 原生集成
 
 上述 `sensenova` provider 也可通过 [opencode 自定义 provider](https://opencode.ai/docs/providers) 直接配置，**无需本扩展**。opencode 原生集成走 `@ai-sdk/openai-compatible`，不依赖自定义 streamSimple，但也不含扩展内置的 `cleanBody` 消息清洗（合并 system 消息、删 `content: null`）。
@@ -186,6 +243,72 @@ pi --provider sensenova --model sensenova/deepseek-v4-flash
           "cost": { "input": 0, "output": 0 }
         }
       }
+    },
+    "siliconflow": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "硅基流动 (SiliconFlow)",
+      "options": {
+        "baseURL": "https://api.siliconflow.cn/v1",
+        "apiKey": "{env:SILICONFLOW_API_KEY}"
+      },
+      "models": {
+        "nex-agi/Nex-N2-Pro": {
+          "name": "Nex-N2-Pro (397B MoE, 免费)",
+          "limit": { "context": 262144, "output": 65536 },
+          "reasoning": true, "tool_call": true, "attachment": true,
+          "cost": { "input": 0, "output": 0 }
+        },
+        "Qwen/Qwen3-8B": {
+          "name": "Qwen3-8B (免费)",
+          "limit": { "context": 262144, "output": 65536 },
+          "reasoning": true, "tool_call": true,
+          "cost": { "input": 0, "output": 0 }
+        }
+      }
+    },
+    "modelscope": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "魔塔社区 (ModelScope)",
+      "options": {
+        "baseURL": "https://api-inference.modelscope.cn/v1",
+        "apiKey": "{env:MODELSCOPE_API_KEY}"
+      },
+      "models": {
+        "deepseek-ai/DeepSeek-V4-Pro": {
+          "name": "DeepSeek V4 Pro",
+          "limit": { "context": 1048576, "output": 65536 },
+          "reasoning": true, "tool_call": true,
+          "cost": { "input": 0, "output": 0 }
+        },
+        "deepseek-ai/DeepSeek-R1": {
+          "name": "DeepSeek R1",
+          "limit": { "context": 1048576, "output": 65536 },
+          "reasoning": true, "tool_call": true,
+          "cost": { "input": 0, "output": 0 }
+        },
+        "Qwen/Qwen3-Coder-480B-A35B-Instruct": {
+          "name": "Qwen3-Coder-480B",
+          "limit": { "context": 262144, "output": 65536 },
+          "reasoning": true, "tool_call": true,
+          "cost": { "input": 0, "output": 0 }
+        }
+      }
+    },
+    "nvidia": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "NVIDIA NIM",
+      "options": {
+        "baseURL": "https://integrate.api.nvidia.com/v1",
+        "apiKey": "{env:NVIDIA_NIM_API_KEY}"
+      },
+      "models": {
+        "openai/gpt-oss-120b": {
+          "name": "GPT-OSS 120B",
+          "limit": { "context": 131072, "output": 65536 },
+          "reasoning": true, "tool_call": true,
+          "cost": { "input": 0, "output": 0 }
+        }
+      }
     }
   }
 }
@@ -196,6 +319,9 @@ pi --provider sensenova --model sensenova/deepseek-v4-flash
 ```bash
 # CLI
 opencode run -m sensenova/sensenova-6.7-flash-lite "你好"
+opencode run -m siliconflow/nex-agi/Nex-N2-Pro "你好"
+opencode run -m modelscope/deepseek-ai/DeepSeek-V4-Pro "你好"
+opencode run -m nvidia/openai/gpt-oss-120b "你好"
 
 # 设为默认模型
 opencode.json → "model": "sensenova/glm-5.2"
