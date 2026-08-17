@@ -165,14 +165,15 @@ pi -p --provider siliconflow --model siliconflow/nex-agi/Nex-N2-Pro "你好"
 export MODELSCOPE_API_KEY=ms-xxx
 
 # 使用
-pi -p --provider modelscope --model modelscope/deepseek-ai/DeepSeek-V4-Pro "你好"
+pi -p --provider modelscope --model modelscope/Qwen/Qwen3-Coder-30B-A3B-Instruct "你好"
 ```
 
 | 模型 ID | 说明 | 上下文 | 限额 |
 |---|---|---|---|
-| `deepseek-ai/DeepSeek-V4-Pro` | DeepSeek V4 Pro 强推理 | 1M | 2000 次/天 |
-| `deepseek-ai/DeepSeek-R1` | DeepSeek R1 推理模型 | 1M | 2000 次/天 |
-| `Qwen/Qwen3-Coder-480B-A35B-Instruct` | Qwen3 Coder 480B MoE | 256K | 2000 次/天 |
+| `Qwen/Qwen3-Coder-30B-A3B-Instruct` | Qwen3 Coder 30B（实测可用） | 128K | 2000 次/天 |
+| `deepseek-ai/DeepSeek-V4-Pro` | DeepSeek V4 Pro 强推理（存在，**需在控制台开通该模型额度**，否则 429） | 1M | 开通后 2000 次/天 |
+
+> 实测发现 ModelScope 免费额度是**按模型**的：新账号默认只有部分模型可用（如 Qwen3-Coder-30B），其余返回 `UnknownError` 或 429 `insufficient_quota`，需在 [ModelScope 控制台](https://modelscope.cn) 逐个开通。可用模型以 `GET /v1/models` 为准（本扩展只注册了实测过的模型）。
 
 ### NVIDIA NIM
 
@@ -274,21 +275,15 @@ pi -p --provider nvidia --model nvidia/openai/gpt-oss-120b "你好"
         "apiKey": "{env:MODELSCOPE_API_KEY}"
       },
       "models": {
+        "Qwen/Qwen3-Coder-30B-A3B-Instruct": {
+          "name": "Qwen3-Coder-30B",
+          "limit": { "context": 131072, "output": 65536 },
+          "reasoning": true, "tool_call": true,
+          "cost": { "input": 0, "output": 0 }
+        },
         "deepseek-ai/DeepSeek-V4-Pro": {
-          "name": "DeepSeek V4 Pro",
+          "name": "DeepSeek V4 Pro (需在控制台开通额度)",
           "limit": { "context": 1048576, "output": 65536 },
-          "reasoning": true, "tool_call": true,
-          "cost": { "input": 0, "output": 0 }
-        },
-        "deepseek-ai/DeepSeek-R1": {
-          "name": "DeepSeek R1",
-          "limit": { "context": 1048576, "output": 65536 },
-          "reasoning": true, "tool_call": true,
-          "cost": { "input": 0, "output": 0 }
-        },
-        "Qwen/Qwen3-Coder-480B-A35B-Instruct": {
-          "name": "Qwen3-Coder-480B",
-          "limit": { "context": 262144, "output": 65536 },
           "reasoning": true, "tool_call": true,
           "cost": { "input": 0, "output": 0 }
         }
@@ -320,7 +315,7 @@ pi -p --provider nvidia --model nvidia/openai/gpt-oss-120b "你好"
 # CLI
 opencode run -m sensenova/sensenova-6.7-flash-lite "你好"
 opencode run -m siliconflow/nex-agi/Nex-N2-Pro "你好"
-opencode run -m modelscope/deepseek-ai/DeepSeek-V4-Pro "你好"
+opencode run -m modelscope/Qwen/Qwen3-Coder-30B-A3B-Instruct "你好"
 opencode run -m nvidia/openai/gpt-oss-120b "你好"
 
 # 设为默认模型

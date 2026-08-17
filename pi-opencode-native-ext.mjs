@@ -351,7 +351,9 @@ const streamSenseNova = makeOpenAIStream("https://token.sensenova.cn/v1", "SENSE
 
 // Standard OpenAI-compatible providers
 const streamSiliconFlow = makeOpenAIStream("https://api.siliconflow.cn/v1", "SILICONFLOW_API_KEY");
-const streamModelScope = makeOpenAIStream("https://api-inference.modelscope.cn/v1", "MODELSCOPE_API_KEY");
+const streamModelScope = makeOpenAIStream("https://api-inference.modelscope.cn/v1", "MODELSCOPE_API_KEY", {
+  maxTokens: 65536,
+});
 const streamNvidia = makeOpenAIStream("https://integrate.api.nvidia.com/v1", "NVIDIA_NIM_API_KEY");
 
 async function run(stream, output, model, context, options, cfg) {
@@ -563,33 +565,24 @@ export default async function (pi) {
     streamSimple: streamModelScope,
     models: [
       {
+        id: "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+        name: "Qwen3-Coder-30B (via ModelScope)",
+        api: "openai-completions",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 131072,
+        maxTokens: 65536,
+      },
+      // DeepSeek-V4-Pro 存在但默认配额不足(429)，需在 ModelScope 控制台开通对应模型额度
+      {
         id: "deepseek-ai/DeepSeek-V4-Pro",
-        name: "DeepSeek V4 Pro (via ModelScope)",
+        name: "DeepSeek V4 Pro (via ModelScope, 需开通)",
         api: "openai-completions",
         reasoning: true,
         input: ["text"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 1048576,
-        maxTokens: 65536,
-      },
-      {
-        id: "deepseek-ai/DeepSeek-R1",
-        name: "DeepSeek R1 (via ModelScope)",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 1048576,
-        maxTokens: 65536,
-      },
-      {
-        id: "Qwen/Qwen3-Coder-480B-A35B-Instruct",
-        name: "Qwen3-Coder-480B (via ModelScope)",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 262144,
         maxTokens: 65536,
       },
     ],
