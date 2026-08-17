@@ -135,6 +135,85 @@ pi --provider sensenova --model sensenova/deepseek-v4-flash
 
 注意：`sensenova-u1-fast` 是**图像生成专用**模型（走 `/v1/images/generations`），与 chat completions 不兼容，本扩展不支持。
 
+## opencode 原生集成
+
+上述 `sensenova` provider 也可通过 [opencode 自定义 provider](https://opencode.ai/docs/providers) 直接配置，**无需本扩展**。opencode 原生集成走 `@ai-sdk/openai-compatible`，不依赖自定义 streamSimple，但也不含扩展内置的 `cleanBody` 消息清洗（合并 system 消息、删 `content: null`）。
+
+### 配置
+
+`~/.config/opencode/opencode.json`（全局）或 `opencode.json`（项目级）：
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "sensenova": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "SenseNova (商汤日日新)",
+      "options": {
+        "baseURL": "https://token.sensenova.cn/v1",
+        "apiKey": "{env:SENSENOVA_API_KEY}"
+      },
+      "models": {
+        "sensenova-6.7-flash-lite": {
+          "name": "SenseNova 6.7 Flash-Lite",
+          "limit": { "context": 262144, "output": 65536 },
+          "reasoning": true,
+          "attachment": true,
+          "tool_call": true,
+          "cost": { "input": 0, "output": 0 }
+        },
+        "sensenova-6.8-flash-lite": {
+          "name": "SenseNova 6.8 Flash-Lite",
+          "limit": { "context": 262144, "output": 65536 },
+          "reasoning": true,
+          "attachment": true,
+          "tool_call": true,
+          "cost": { "input": 0, "output": 0 }
+        },
+        "deepseek-v4-flash": {
+          "name": "DeepSeek V4 Flash (via SenseNova)",
+          "limit": { "context": 1048576, "output": 65536 },
+          "reasoning": true,
+          "tool_call": true,
+          "cost": { "input": 0, "output": 0 }
+        },
+        "glm-5.2": {
+          "name": "GLM-5.2 (via SenseNova)",
+          "limit": { "context": 1048576, "output": 131072 },
+          "reasoning": true,
+          "tool_call": true,
+          "cost": { "input": 0, "output": 0 }
+        }
+      }
+    }
+  }
+}
+```
+
+### 使用
+
+```bash
+# CLI
+opencode run -m sensenova/sensenova-6.7-flash-lite "你好"
+
+# 设为默认模型
+opencode.json → "model": "sensenova/glm-5.2"
+```
+
+TUI 内 `Ctrl+O` 选 provider 后用 `Ctrl+P` 切换模型。
+
+### 与 pi 扩展的差异
+
+| 维度 | pi 扩展 (`pi-opencode-native`) | opencode 原生 |
+|---|---|---|
+| 底层 | 自定义 streamSimple + fetch | `@ai-sdk/openai-compatible` |
+| 消息清洗 | 内置 `cleanBody`（合并 system、删 `content: null`） | 无（AI SDK 默认行为） |
+| Scope | 仅 pi 可用 | opencode TUI/CLI 可用 |
+| 依赖 | 零外部依赖 | 需 `@ai-sdk/openai-compatible`（opencode 自动安装） |
+
+opencode 原生方式不经过 `cleanBody`，但实测标准对话/工具调用均正常；若遇到 `Errors in message queue response` 400 错误，说明 SenseNova 网关拒绝了某字段，建议换用 pi 扩展（内置清洗）或避免使用 structured output 等特性。
+
 ## 注意事项
 
 1. **模型歧义**：若机器上也配置了 pi 内置 `opencode` provider 且带 key，裸 `--model deepseek-v4-flash-free` 会报 "ambiguous across providers"。解决：显式 `--provider opencode-fix`，或删除内置 opencode 的 key，或将 defaultProvider 设为 `opencode-fix`。
