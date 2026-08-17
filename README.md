@@ -21,15 +21,21 @@ pi 内置的 opencode provider 不使用 opencode UA，因此直接调用免费�
 pi install /path/to/pi-opencode-native-ext.mjs
 ```
 
-### 方式二：GitHub
+### 方式二：GitHub（推荐）
+
+仓库已公开：<https://github.com/pgciq/pi-opencode-native>
 
 ```bash
-pi install git:github.com/<owner>/pi-opencode-native
+pi install git:github.com/pgciq/pi-opencode-native
 # 或
-pi install https://github.com/<owner>/pi-opencode-native
+pi install https://github.com/pgciq/pi-opencode-native
 ```
 
-### 方式三：npm（若已发布）
+> 扩展始终优先以 `pi-opencode-native-ext.mjs` 为入口文件（仓库根目录），`pi install` 会自动识别；若需指定分支可追加 `#master`。
+
+### 方式三：npm
+
+npm 包**尚未发布**（`pi-opencode-native` 在 registry 中不存在）。发布后可使用：
 
 ```bash
 pi install npm:pi-opencode-native
