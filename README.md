@@ -193,6 +193,32 @@ pi -p --provider nvidia --model nvidia/openai/gpt-oss-120b "你好"
 
 > 更多模型可通过 `GET /v1/models` 查询（需有效 key），模型更新频繁，以官网为准。
 
+### 如何选择
+
+三供应商免费模型能力定位（基准数据截至 2026-08，来源：官方技术报告 + 独立评测）：
+
+| 供应商 | 模型 | 规模 | 上下文 | 能力定位 | 实测 |
+|---|---|---|---|---|---|
+| 硅基流动 | `nex-agi/Nex-N2-Pro` | 397B MoE (17B 激活) | 256K | 🏆 旗舰编码/agent：SWE-Bench Pro 58.8（微超 GPT-5.5）、Terminal-Bench 2.1 75.3（超 Opus 4.7）、SWE Verified 80.8；中文友好（基座 Qwen3.5）；最难真实任务（DeepSWE 33.6）仍有差距 | ✅ |
+| 硅基流动 | `Qwen/Qwen3-8B` | 8B dense | 256K | 轻量通用，响应快 | ✅ |
+| 魔塔社区 | `Qwen/Qwen3-Coder-30B-A3B-Instruct` | 30B MoE (3B 激活) | 128K | 中端编码向：SWE-bench Lite 49.7%（88 百分位）；**唯一开箱即用**的 ModelScope 模型 | ✅ |
+| 魔塔社区 | `deepseek-ai/DeepSeek-V4-Pro` | 1.6T MoE (49B 激活) | **1M** | 顶级推理 + **1M 超长上下文**（整仓库/长文档分析独一档）+ 中文世界知识第一（Chinese-SimpleQA 84.4，仅次 Gemini-3.1-Pro）；抽象推理偏弱（ARC-AGI-2 46%） | ❌ 需开通 |
+| NVIDIA | `openai/gpt-oss-120b` | 117B MoE (5.1B 激活) | 128K | 数学/工具调用强（AIME 95.8、Codeforces 2463，接近 o4-mini）；**中文致命伤**（C-Eval 42% vs MMLU 90%） | ✅ |
+
+**场景选择矩阵：**
+
+| 场景 | 选它 |
+|---|---|
+| 日常编码 / agent 开发（默认主力） | **硅基 Nex-N2-Pro**（免费 + 综合最强） |
+| 中文任务 | Nex-N2-Pro 或 DeepSeek-V4-Pro（**勿用 GPT-OSS-120B**） |
+| 超长文档、整仓库分析 | DeepSeek-V4-Pro（需先在控制台开通额度） |
+| 英文数学、结构化输出 | **NVIDIA GPT-OSS-120B** |
+| 限流兜底、轻量快速 | ModelScope Qwen3-Coder-30B / 硅基 Qwen3-8B |
+
+**推荐组合**：主力 `siliconflow/nex-agi/Nex-N2-Pro` + 兜底 `modelscope/Qwen/Qwen3-Coder-30B-A3B-Instruct`（额度独立，主力限流时顶上），特殊场景按需切换。
+
+⚠️ 三平台免费额度均注明 "limited time"，模型可能随时下架/改名/转付费（NVIDIA 实测已下架 3 个模型），且免费期会话数据可能被用于改进模型，**勿发敏感内容、勿当生产依赖**。
+
 ## opencode 原生集成
 
 上述 `sensenova` provider 也可通过 [opencode 自定义 provider](https://opencode.ai/docs/providers) 直接配置，**无需本扩展**。opencode 原生集成走 `@ai-sdk/openai-compatible`，不依赖自定义 streamSimple，但也不含扩展内置的 `cleanBody` 消息清洗（合并 system 消息、删 `content: null`）。
