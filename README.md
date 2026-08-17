@@ -111,10 +111,16 @@ auth.json 中预置 `sensenova` 占位条目（`key: "public"`），同 `opencod
 
 ### 可用模型
 
-| 模型 ID | 说明 | 限额 |
-|---|---|---|
-| `sensenova-6.7-flash-lite` | 轻量多模态智能体（文本+图像） | 1,500 次 / 5h |
-| `deepseek-v4-flash` | DeepSeek 高性能对话（走 SenseNova 网关） | 150 次 / 5h |
+（数据源：[平台文档](https://platform.sensenova.cn/docs)，`GET /v1/models` 权威返回；全部 `pricing=0` 免费，`businesses: tokenplan + metered`）
+
+| 模型 ID | 说明 | 上下文 | 限额 |
+|---|---|---|---|
+| `sensenova-6.7-flash-lite` | 轻量多模态智能体（文本+图像） | 256K | 1,500 次 / 5h |
+| `sensenova-6.8-flash-lite` | 新一代轻量多模态智能体（文本+图像） | 256K | 1,500 次 / 5h |
+| `deepseek-v4-flash` | DeepSeek 高性能对话（thinking/非 thinking、工具调用） | 1M | 150 次 / 5h |
+| `glm-5.2` | 智谱旗舰长程任务模型（1M 上下文，可完成端到端开发管线） | 1M | 免费套餐可用 |
+
+> `sensenova-u1-fast` 为**图像生成专用**（`output_modalities: image`，走 `/v1/images/generations`），与 chat completions 不兼容，未注册。
 
 ### 使用
 
