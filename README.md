@@ -33,9 +33,9 @@ pi install https://github.com/pgciq/pi-opencode-native
 
 > 扩展始终优先以 `pi-opencode-native-ext.mjs` 为入口文件（仓库根目录），`pi install` 会自动识别；若需指定分支可追加 `#master`。
 
-### 方式三：npm
+### 方式三：npm（已发布）
 
-npm 包**尚未发布**（`pi-opencode-native` 在 registry 中不存在）。发布后可使用：
+包已发布到 npm：<https://www.npmjs.com/package/pi-opencode-native>
 
 ```bash
 pi install npm:pi-opencode-native
