@@ -1,0 +1,38 @@
+{
+  "name": "pi-opencode-native",
+  "version": "1.0.0",
+  "description": "pi (AI coding agent CLI) extension: native-channel access to OpenCode Zen free models (deepseek-v4-flash-free, etc.) plus SenseNova / SiliconFlow / ModelScope / NVIDIA NIM providers, bypassing the 429 FreeUsageLimitError via opencode-native headers",
+  "type": "module",
+  "main": "pi-opencode-native-ext.mjs",
+  "files": [
+    "pi-opencode-native-ext.mjs",
+    "README.md"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "opencode",
+    "zen",
+    "deepseek",
+    "free-models",
+    "extension",
+    "cli"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pgciq/pi-opencode-native.git"
+  },
+  "bugs": {
+    "url": "https://github.com/pgciq/pi-opencode-native/issues"
+  },
+  "homepage": "https://github.com/pgciq/pi-opencode-native#readme",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "pi": {
+    "extensions": [
+      "pi-opencode-native-ext.mjs"
+    ]
+  }
+}
