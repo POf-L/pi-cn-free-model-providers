@@ -123,11 +123,16 @@ function normalizeMessages(messages) {
       out.push({ role: "user", content });
     } else if (m.role === "assistant") {
       let content = "";
+      let reasoningContent = "";
       const toolCalls = [];
       if (Array.isArray(m.content)) {
         for (const block of m.content) {
           if (block.type === "text") content += block.text;
-          else if (block.type === "thinking") { /* skip: upstream rejects thinking blocks in history */ }
+          // Replay reasoning instead of dropping it: DeepSeek V4 thinking mode
+          // requires `reasoning_content` echoed back on assistant messages in
+          // history (mandatory on tool-call turns), or the API returns 400.
+          // The zen gateway forwards the top-level field upstream.
+          else if (block.type === "thinking") reasoningContent += block.thinking ?? "";
           else if (block.type === "toolCall") {
             toolCalls.push({
               id: block.id,
@@ -143,6 +148,9 @@ function normalizeMessages(messages) {
         content = m.content || "";
       }
       const mapped = { role: "assistant", content: content || null };
+      // Echo reasoning_content back on every assistant message (empty string
+      // is still required for tool-call turns — DeepSeek rejects omission).
+      if (reasoningContent !== "" || toolCalls.length > 0) mapped.reasoning_content = reasoningContent;
       if (toolCalls.length > 0) mapped.tool_calls = toolCalls;
       out.push(mapped);
     } else if (m.role === "toolResult") {
