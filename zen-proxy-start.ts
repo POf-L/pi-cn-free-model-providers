@@ -1,5 +1,6 @@
-import { appendFileSync } from "node:fs"
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs"
 import { spawn } from "node:child_process"
+import { randomUUID } from "node:crypto"
 import net from "node:net"
 import type { Plugin } from "@opencode-ai/plugin"
 
@@ -11,13 +12,14 @@ const POLL_MS = 300
 const LOG_PATH = "D:\\WindowsTemp\\opencode\\zen-proxy-start.log"
 const OFFICIAL_PROVIDER_ID = "opencode"
 const ZENPROXY_MODEL_ID = "big-pickle"
+const RATE_LIMIT_STATE_PATH = "D:\\WindowsTemp\\opencode\\zen-proxy-rate-limits.json"
+const ZEN_API_BASE = "https://opencode.ai/zen/v1"
+const RATE_LIMIT_TTL_MS = 60 * 60 * 1000
 
 function log(msg: string) {
   try {
     appendFileSync(LOG_PATH, `${new Date().toISOString()} ${msg}\n`)
-  } catch {
-    // logging must never break the request path
-  }
+  } catch {}
 }
 
 log("plugin loaded")
@@ -26,14 +28,8 @@ function portOpen(port: number, host = "127.0.0.1"): Promise<boolean> {
   return new Promise((resolve) => {
     const socket = net.connect({ port, host })
     socket.setTimeout(500)
-    const fail = () => {
-      socket.destroy()
-      resolve(false)
-    }
-    socket.once("connect", () => {
-      socket.destroy()
-      resolve(true)
-    })
+    const fail = () => { socket.destroy(); resolve(false) }
+    socket.once("connect", () => { socket.destroy(); resolve(true) })
     socket.once("error", fail)
     socket.once("timeout", fail)
   })
@@ -54,76 +50,140 @@ function ensureZenProxy(): Promise<boolean> {
   if (ensurePromise) return ensurePromise
   ensurePromise = (async () => {
     try {
-      if (await portOpen(PORT)) {
-        log("proxy already up")
-        return true
-      }
+      if (await portOpen(PORT)) { log("proxy already up"); return true }
       log(`port ${PORT} closed, launching ${BAT_PATH}`)
       spawn("cmd", ["/c", "start", "", "cmd", "/k", BAT_PATH], {
-        detached: true,
-        stdio: "ignore",
+        detached: true, stdio: "ignore",
       }).unref()
       const ok = await waitForPort(START_TIMEOUT_MS)
       log(ok ? `proxy ready (${START_TIMEOUT_MS}ms cap)` : `proxy FAILED to start within ${START_TIMEOUT_MS}ms`)
       return ok
-    } finally {
-      ensurePromise = null
-    }
+    } finally { ensurePromise = null }
   })()
   return ensurePromise
 }
 
+function loadRateLimit(): number | null {
+  try {
+    const raw = readFileSync(RATE_LIMIT_STATE_PATH, "utf-8").trim()
+    const parsed = JSON.parse(raw)
+    let expireAt: number | null = null
+    if (typeof parsed === "number") {
+      expireAt = parsed
+    } else if (Array.isArray(parsed) && parsed.length > 0) {
+      expireAt = Math.max(...parsed.map((e: any) => Number(e[1]) || 0))
+    }
+    if (expireAt && expireAt > Date.now()) {
+      log(`restored global rate limit, expires in ${Math.round((expireAt - Date.now()) / 1000)}s`)
+      return expireAt
+    }
+    if (expireAt) log(`rate limit expired, ignoring`)
+  } catch {}
+  return null
+}
+
+function saveRateLimit(expireAt: number) {
+  try {
+    writeFileSync(RATE_LIMIT_STATE_PATH, JSON.stringify(expireAt))
+  } catch {}
+}
+
+function randId(prefix: string): string {
+  return prefix + randomUUID().replace(/-/g, "").slice(0, 22)
+}
+
+function isRateLimitBody(body: string): boolean {
+  return /FreeUsageLimitError|GoUsageLimitError|insufficient.?quota|quota.?exceeded|rate.?limit|too.?many.?requests/i.test(body)
+}
+
+async function healthCheckRateLimit(): Promise<number | null> {
+  try {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 8000)
+    const resp = await fetch(`${ZEN_API_BASE}/models`, {
+      signal: controller.signal,
+      headers: { "Accept": "application/json" },
+    })
+    clearTimeout(timer)
+    if (resp.status === 429) {
+      const body = await resp.text()
+      log(`health check: 429, body=${body.slice(0, 300)}`)
+      if (isRateLimitBody(body)) {
+        return Date.now() + RATE_LIMIT_TTL_MS
+      }
+    }
+    log(`health check: OK (status=${resp.status})`)
+  } catch (e: any) {
+    log(`health check: failed (${e?.name || e?.message || e})`)
+  }
+  return null
+}
+
 export default (async ({ client }) => {
-  const failedOver = new Set<string>()
+  let globalRateLimitExpireAt: number | null = loadRateLimit()
+
+  const startupCheck = (async () => {
+    if (globalRateLimitExpireAt && Date.now() < globalRateLimitExpireAt) {
+      log("startup: rate limit loaded from state, skip health check")
+      return
+    }
+    log("startup: health check -> official API")
+    const expireAt = await healthCheckRateLimit()
+    if (expireAt) {
+      globalRateLimitExpireAt = expireAt
+      saveRateLimit(expireAt)
+      log(`startup: rate-limited, will redirect to zenproxy`)
+    }
+  })()
 
   return {
     "chat.params": async (input) => {
-      if (input.model.providerID !== PROVIDER_ID) return
-      log(`zenproxy request from agent=${input.agent}`)
-      await ensureZenProxy()
+      if (input.model.providerID !== OFFICIAL_PROVIDER_ID) {
+        if (input.model.providerID === PROVIDER_ID) {
+          log(`zenproxy request from agent=${input.agent}`)
+          await ensureZenProxy()
+        }
+        return
+      }
+      await startupCheck
+      if (globalRateLimitExpireAt && Date.now() < globalRateLimitExpireAt) {
+        log(`rate-limited (expires in ${Math.round((globalRateLimitExpireAt - Date.now()) / 1000)}s), overriding -> zenproxy`)
+        input.model.providerID = PROVIDER_ID
+        input.model.modelID = ZENPROXY_MODEL_ID
+        await ensureZenProxy()
+        return
+      }
+      log(`official opencode request from agent=${input.agent}`)
     },
-    "chat.message": async (input, output) => {
-      const msg = output.message as unknown as {
-        providerID: string
-        parentID?: string
-        error?: { name?: string; data?: { statusCode?: number; message?: string } }
+    "chat.headers": async (input, output) => {
+      if (input.model.providerID !== OFFICIAL_PROVIDER_ID) return
+      output.headers["x-opencode-session"] = randId("ses_")
+      output.headers["x-opencode-request"] = randId("req_")
+      if (output.headers["x-opencode-project"]) {
+        output.headers["x-opencode-project"] = randId("proj_")
       }
-      if (msg.providerID !== OFFICIAL_PROVIDER_ID) return
-      const err = msg.error
-      if (err?.name !== "APIError" || err.data?.statusCode !== 429) return
-      if (failedOver.has(input.sessionID)) return
-      if (!msg.parentID) return
-      let text = ""
-      try {
-        const parent = await client.session.message({
-          path: { id: input.sessionID, messageID: msg.parentID },
-        })
-        text = (parent.parts as { type: string; text?: string }[])
-          .filter((p) => p.type === "text" && p.text)
-          .map((p) => p.text as string)
-          .join("\n")
-      } catch (e) {
-        log(`429 failover: failed to read parent message: ${e}`)
-        return
+      if (!output.headers["x-opencode-client"]) {
+        output.headers["x-opencode-client"] = "cli"
       }
-      if (!text) {
-        log("429 failover: parent message has no text parts, skipping")
-        return
-      }
-      await ensureZenProxy()
-      failedOver.add(input.sessionID)
-      try {
-        await client.session.promptAsync({
-          path: { id: input.sessionID },
-          body: {
-            model: { providerID: PROVIDER_ID, modelID: ZENPROXY_MODEL_ID },
-            parts: [{ type: "text", text }],
-          },
-        })
-        log(`429 failover -> zenproxy for session=${input.sessionID}`)
-      } catch (e) {
-        log(`429 failover: promptAsync failed: ${e}`)
-        failedOver.delete(input.sessionID)
+      log(`headers rewritten: ses=${output.headers["x-opencode-session"]} req=${output.headers["x-opencode-request"]}`)
+    },
+    event: async ({ event }) => {
+      if (event.type === "session.status") {
+        const props = (event as any).properties ?? {}
+        const status = props.status as any
+        if (status?.type === "retry") {
+          const reason = status.action?.reason
+          if (
+            reason === "free_tier_limit" ||
+            reason === "account_rate_limit" ||
+            /rate.?limit|quota|overloaded|too many/i.test(status.message || "")
+          ) {
+            const ttl = status.next ? status.next - Date.now() : RATE_LIMIT_TTL_MS
+            globalRateLimitExpireAt = Date.now() + Math.max(ttl, 60_000)
+            saveRateLimit(globalRateLimitExpireAt)
+            log(`rate-limited: reason=${reason} next=${status.next} ttl=${Math.round(ttl / 1000)}s`)
+          }
+        }
       }
     },
   }
