@@ -379,6 +379,7 @@ opencode 原生方式不经过 `cleanBody`，但实测标准对话/工具调用�
 7. **代理会导致 500**：Zen API 请求**不能走 HTTP 代理**（实测经 v2rayN/Clash 等代理转发返回 500 Internal server error，直连正常）。若系统全局代理已开启（Windows WinINET），node/bun 的 fetch 默认不读系统代理所以不受影响，但请勿为此扩展显式设置 `HTTPS_PROXY`/`HTTP_PROXY` 环境变量指向代理。
 8. **DeepSeek V4 思维模式回传**：`deepseek-v4-flash-free` 思维模式开启时，DeepSeek 要求历史中 assistant 消息（尤其带 `tool_calls` 的轮次）必须回传 `reasoning_content`，缺失即报 `400 The reasoning_content in the thinking mode must be passed back to the API`。本扩展已把 pi 内部 thinking 块转回顶层 `reasoning_content` 字段随历史回传（空字符串也保留，工具调用轮次强制携带）。
 9. **npm 发布与 token 安全**：发布到 npm 需要账号 2FA。建议在 npm 网页生成 granular access token 并勾选 *Bypass 2FA on publish*，存为环境变量 `NPM_BYPASS_TOKEN`，再写入本地 `~/.npmrc` 的 `_authToken` 供 `npm publish` 使用（免验证码）。**`~/.npmrc` 内含可绕过 2FA 的明文 token，切勿提交到任何仓库或分享给他人**；若将 home 配置纳入 git 管理（dotfiles 仓库），务必先把 `~/.npmrc` 加入 `.gitignore`。
+10. **package.json 的 UTF-8 BOM（1.0.2 已修复）**：1.0.0/1.0.1 发布到 npm 的 `package.json` 首行带 UTF-8 BOM。pi 的 `readPiManifest` 用裸 `JSON.parse` 解析该文件，BOM 会令解析抛错并被静默忽略，导致整个扩展不加载（`/model` 里看不到 `opencode-fix`/`sensenova` 等任何 provider）。1.0.2 起已去掉 BOM；若 `pi install` 后看不到 provider，请 `pi update --extensions` 确认装的是 1.0.2+。pi 侧的健壮性问题已提交：[earendil-works/pi#8310](https://github.com/earendil-works/pi/issues/8310)。
 
 ## License
 
