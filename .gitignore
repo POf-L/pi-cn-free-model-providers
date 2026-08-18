@@ -1,0 +1,48 @@
+# ── Node / npm ──
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# npm package tarballs (npm pack / npm publish artifacts)
+*.tgz
+
+# npm auth token (README: ~/.npmrc 内含可绕过 2FA 的明文 token，切勿提交)
+.npmrc
+
+# ── Environment ──
+.env
+.env.*
+!.env.example
+
+# ── Build / output ──
+dist/
+build/
+*.tsbuildinfo
+coverage/
+
+# ── Tool workspace dirs ──
+.omo/
+.codegraph/
+.opencode/
+
+# ── Logs ──
+*.log
+
+# ── Editor / IDE ──
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db
