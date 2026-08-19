@@ -299,15 +299,18 @@ function makeOutput(model) {
 }
 
 // Factory for standard OpenAI-compatible providers (no special headers/schema).
+// opts.maxTokens may be a number (all models) or a function (model) => number
+// to let each model use its own registered limit.
 function makeOpenAIStream(baseUrl, envKey, opts = {}) {
   return function streamSimple(model, context, options) {
     const stream = new AssistantMessageEventStream();
     const output = makeOutput(model);
+    const maxTokens = typeof opts.maxTokens === "function" ? opts.maxTokens(model) : (opts.maxTokens ?? 128000);
     const cfg = {
       url: `${baseUrl.replace(/\/+$/, "")}/chat/completions`,
       key: () => process.env[envKey] ?? (options?.apiKey && options.apiKey !== "public" ? options.apiKey : undefined),
       headers: () => ({}),
-      maxTokens: opts.maxTokens ?? 128000,
+      maxTokens,
     };
     if (opts.cleanBody) cfg.cleanBody = opts.cleanBody;
     run(stream, output, model, context, options, cfg);
@@ -363,6 +366,31 @@ const streamModelScope = makeOpenAIStream("https://api-inference.modelscope.cn/v
   maxTokens: 65536,
 });
 const streamNvidia = makeOpenAIStream("https://integrate.api.nvidia.com/v1", "NVIDIA_NIM_API_KEY");
+
+// Cloudflare Workers AI — official OpenAI-compatible endpoint.
+// https://developers.cloudflare.com/workers-ai/configuration/open-ai-compatibility/
+// The account id is embedded in the URL path, so the base URL is built from
+// CLOUDFLARE_ACCOUNT_ID at request time (cannot use makeOpenAIStream's static
+// baseUrl). Free tier: 10,000 neurons/day (UTC reset); the 5 frontier models
+// (deepseek-v4-flash/pro, glm-5.2, kimi-k2.6/k2.7-code) require paid billing
+// and are intentionally NOT registered here.
+const streamCloudflare = (model, context, options) => {
+  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+  if (!accountId) {
+    const stream = new AssistantMessageEventStream();
+    const output = makeOutput(model);
+    output.stopReason = "error";
+    output.errorMessage = "CLOUDFLARE_ACCOUNT_ID env var is not set; cannot build Workers AI endpoint URL";
+    stream.push({ type: "error", reason: "error", error: output });
+    try { stream.end(); } catch {}
+    return stream;
+  }
+  return makeOpenAIStream(
+    `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1`,
+    "CLOUDFLARE_API_KEY",
+    { maxTokens: (model) => model.maxTokens ?? 65536 }
+  )(model, context, options);
+};
 
 async function run(stream, output, model, context, options, cfg) {
   const state = { output, stream, contentBlockIndex: -1, thinkingBlockIndex: -1, toolCallsState: [] };
@@ -609,6 +637,94 @@ export default async function (pi) {
         input: ["text"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 131072,
+        maxTokens: 65536,
+      },
+    ],
+  });
+  pi.registerProvider("cloudflare", {
+    name: "Cloudflare Workers AI (免费额度)",
+    baseUrl: "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
+    api: "openai-completions",
+    streamSimple: streamCloudflare,
+    models: [
+      {
+        id: "@cf/openai/gpt-oss-120b",
+        name: "GPT-OSS 120B (via Cloudflare)",
+        api: "openai-completions",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 131072,
+        maxTokens: 65536,
+      },
+      {
+        id: "@cf/openai/gpt-oss-20b",
+        name: "GPT-OSS 20B (via Cloudflare)",
+        api: "openai-completions",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 131072,
+        maxTokens: 65536,
+      },
+      {
+        id: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        name: "Llama 3.3 70B (via Cloudflare)",
+        api: "openai-completions",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 24000,
+        maxTokens: 8192,
+      },
+      {
+        id: "@cf/qwen/qwen3-30b-a3b-fp8",
+        name: "Qwen3 30B A3B (via Cloudflare)",
+        api: "openai-completions",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 32768,
+        maxTokens: 8192,
+      },
+      {
+        id: "@cf/qwen/qwen2.5-coder-32b-instruct",
+        name: "Qwen2.5 Coder 32B (via Cloudflare)",
+        api: "openai-completions",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 32768,
+        maxTokens: 8192,
+      },
+      {
+        id: "@cf/google/gemma-4-26b-a4b-it",
+        name: "Gemma 4 26B (via Cloudflare)",
+        api: "openai-completions",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 131072,
+        maxTokens: 65536,
+      },
+      {
+        id: "@cf/zai-org/glm-4.7-flash",
+        name: "GLM-4.7-Flash (via Cloudflare)",
+        api: "openai-completions",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 131072,
+        maxTokens: 65536,
+      },
+      {
+        id: "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
+        name: "DeepSeek R1 Distill Qwen 32B (via Cloudflare)",
+        api: "openai-completions",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 80000,
         maxTokens: 65536,
       },
     ],
