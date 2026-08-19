@@ -104,7 +104,7 @@ TUI 内 **Ctrl+P** 循环切换模型。
 
 ## 额外供应商
 
-除 Zen 免费模型外，本扩展还注册了 **4 个第三方免费/低成本供应商**。所有 provider 的 key 解析优先级一致：环境变量 → auth.json 中非 `public` 的 key → 匿名占位（`key: "public"` 会被忽略）。auth.json 中相应条目**不要删除**——pi 找不到该 provider 的 key 时会直接跳过扩展。
+除 Zen 免费模型外，本扩展还注册了 **5 个第三方免费/低成本供应商**。所有 provider 的 key 解析优先级一致：环境变量 → auth.json 中非 `public` 的 key → 匿名占位（`key: "public"` 会被忽略）。auth.json 中相应条目**不要删除**——pi 找不到该 provider 的 key 时会直接跳过扩展。
 
 ### SenseNova（商汤日日新）
 
@@ -195,9 +195,63 @@ pi -p --provider nvidia --model nvidia/openai/gpt-oss-120b "你好"
 
 > 更多模型可通过 `GET /v1/models` 查询（需有效 key），模型更新频繁，以官网为准。
 
+### Cloudflare Workers AI
+
+Cloudflare 官方托管推理平台，走 **OpenAI 兼容端点**（`https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1`）。免费套餐每天 **10,000 Neurons**（UTC 0 点重置），在此额度内大部分模型免费调用。
+
+#### 配置
+
+```bash
+# 在 https://dash.cloudflare.com 获取 Account ID，创建 API Token（Workers AI 权限）
+export CLOUDFLARE_ACCOUNT_ID=your-32-character-account-id
+export CLOUDFLARE_API_KEY=your-api-token
+```
+
+#### 可用模型
+
+（数据源：官方定价页 + `GET /accounts/{id}/ai/models/search`；仅注册免费额度内可用的模型）
+
+| 模型 ID | 说明 | 上下文 |
+|---|---|---|
+| `@cf/openai/gpt-oss-120b` | OpenAI 开源旗舰（编码/数学强） | 128K |
+| `@cf/openai/gpt-oss-20b` | 低延迟版 | 128K |
+| `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | 最强 Llama 3.3 | 128K |
+| `@cf/qwen/qwen3-30b-a3b-fp8` | Qwen3 MoE 高效 | 128K |
+| `@cf/qwen/qwen2.5-coder-32b-instruct` | 代码专用 | 128K |
+| `@cf/google/gemma-4-26b-a4b-it` | Google 多模态（文本+图像） | 128K |
+| `@cf/zai-org/glm-4.7-flash` | 131K 上下文 | 131K |
+| `@cf/deepseek-ai/deepseek-r1-distill-qwen-32b` | DeepSeek 推理 | 64K |
+
+> ⚠️ **付费模型未注册**：`deepseek-v4-flash-0731`、`deepseek-v4-pro-0813`、`glm-5.2`、`kimi-k2.6`、`kimi-k2.7-code` 需 Workers Paid 账单或 AI Gateway 预付额度，免费额度调用会失败，本扩展（及 opencode blacklist）已排除。
+
+#### 使用
+
+```bash
+pi -p --provider cloudflare --model cloudflare/@cf/openai/gpt-oss-120b "你好"
+```
+
+#### Cloudflare 特有的坑（已内置处理）
+
+- URL 路径内嵌账户 ID，`streamCloudflare` 在请求时从 `CLOUDFLARE_ACCOUNT_ID` 动态拼装；该变量缺失时立即报错而非静默失败。
+- 响应含 `reasoning_content`（思考）字段，扩展的标准 `processDelta` 已按 thinking 块处理并回传历史（与 DeepSeek V4 一致）。
+- 免费额度按 Neurons 计费（非 token），模型越强越费：70B 模型 ~0.29¢/K 输入、~2.25¢/K 输出；10K neurons 每天约能跑几十次轻量问答。
+
+#### 实测兼容性（2026-08，`/ai/v1/chat/completions` 端点）
+
+| 模型 | 纯对话 | 工具调用 (tool_calls) | 多轮历史回传 |
+|---|---|---|---|
+| `@cf/zai-org/glm-4.7-flash` | ✅ | ✅ 标准格式 | ✅ **agent 工作流首选** |
+| `@cf/qwen/qwen2.5-coder-32b-instruct` | ✅ | ⚠️ 以 `<tools>` XML 文本嵌入，**不走标准 tool_calls** | ⚠️ 仅适合纯对话/代码问答 |
+| `@cf/openai/gpt-oss-120b` | ✅ | ✅ 第一轮正常 | ❌ 回传历史报 400 schema 错误（CF 端已知限制） |
+| `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | ✅ | 未全测（24K 上下文，注意 max_tokens 已按实测收紧） | — |
+| `@cf/qwen/qwen3-30b-a3b-fp8` | ✅ | 未全测（32K 上下文，已按实测收紧） | — |
+| `@cf/deepseek-ai/deepseek-r1-distill-qwen-32b` | ✅ | 未全测（80K 上下文） | — |
+
+> 各模型实际上下文以本次实测为准：`llama-3.3-70b` = 24K、`qwen3-30b-a3b`/`qwen2.5-coder-32b` = 32K、`deepseek-r1-distill-qwen-32b` = 80K、其余 ≥131K。模型注册的 `contextWindow`/`maxTokens` 已按实测值收紧，避免 CF 端 400 超限错误。
+
 ### 如何选择
 
-4 个额外供应商全部免费模型统一对比（基准数据截至 2026-08，来源：官方技术报告 + 独立评测）：
+5 个额外供应商全部免费模型统一对比（基准数据截至 2026-08，来源：官方技术报告 + 独立评测）：
 
 | 供应商 | 模型 | 规模 | 上下文 | 能力定位 | 实测 |
 |---|---|---|---|---|---|
@@ -210,6 +264,11 @@ pi -p --provider nvidia --model nvidia/openai/gpt-oss-120b "你好"
 | SenseNova | `deepseek-v4-flash` | — | 1M | DeepSeek 高性能对话（thinking/非 thinking、工具调用） | ✅ |
 | SenseNova | `sensenova-6.8-flash-lite` | — | 256K | 新一代轻量多模态（文本+图像） | ✅ |
 | SenseNova | `sensenova-6.7-flash-lite` | — | 256K | 轻量多模态智能体（文本+图像） | ✅ |
+| Cloudflare | `@cf/zai-org/glm-4.7-flash` | — | 131K | 131K 上下文，**工具调用/agent 完整兼容**（CF 端实测最佳） | ✅ |
+| Cloudflare | `@cf/openai/gpt-oss-120b` | 117B MoE (5.1B 激活) | 128K | 编码/数学强，但**多轮工具历史回传不兼容**（单轮可用） | ⚠️ |
+| Cloudflare | `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | 70B | 24K（实测） | 最强 Llama 3.3，上下文小 | ✅ |
+| Cloudflare | `@cf/qwen/qwen2.5-coder-32b-instruct` | 32B | 32K（实测） | 代码专用，工具调用为 XML 文本（非标准） | ⚠️ |
+| Cloudflare | `@cf/google/gemma-4-26b-a4b-it` | 26B MoE (4B 激活) | 128K | 多模态（文本+图像） | ✅ |
 
 **场景选择矩阵：**
 
@@ -218,8 +277,9 @@ pi -p --provider nvidia --model nvidia/openai/gpt-oss-120b "你好"
 | 日常编码 / agent 开发（默认主力） | **硅基 Nex-N2-Pro**（免费 + 综合最强） |
 | 超长上下文 / 长程开发管线 | SenseNova `glm-5.2`（开箱即用）或魔塔 `DeepSeek-V4-Pro`（需开通额度） |
 | 中文任务 | Nex-N2-Pro 或 DeepSeek-V4-Pro（**勿用 GPT-OSS-120B**） |
-| 多模态（文本+图像） | SenseNova `sensenova-6.8-flash-lite` |
+| 多模态（文本+图像） | SenseNova `sensenova-6.8-flash-lite` 或 Cloudflare `gemma-4-26b` |
 | 英文数学、结构化输出 | **NVIDIA GPT-OSS-120B** |
+| 海外网络兜底 / agent 工作流 | **Cloudflare `glm-4.7-flash`**（额度独立，工具调用完整兼容） |
 | 限流兜底、轻量快速 | ModelScope Qwen3-Coder-30B / 硅基 Qwen3-8B |
 
 **推荐组合**：主力 `siliconflow/nex-agi/Nex-N2-Pro` + 兜底 `modelscope/Qwen/Qwen3-Coder-30B-A3B-Instruct`（额度独立，主力限流时顶上）；长上下文/多模态需求切 SenseNova，特殊场景按需切换。
@@ -229,6 +289,39 @@ pi -p --provider nvidia --model nvidia/openai/gpt-oss-120b "你好"
 ## opencode 原生集成
 
 上述 `sensenova` provider 也可通过 [opencode 自定义 provider](https://opencode.ai/docs/providers) 直接配置，**无需本扩展**。opencode 原生集成走 `@ai-sdk/openai-compatible`，不依赖自定义 streamSimple，但也不含扩展内置的 `cleanBody` 消息清洗（合并 system 消息、删 `content: null`）。
+
+### Cloudflare Workers AI（内置 provider，零配置）
+
+opencode **原生内置** `cloudflare-workers-ai` provider，只需设置环境变量（与 pi 扩展共用）：
+
+```bash
+export CLOUDFLARE_ACCOUNT_ID=your-32-character-account-id
+export CLOUDFLARE_API_KEY=your-api-token
+```
+
+TUI 内 `/models` 即可看到 `cloudflare-workers-ai/@cf/...` 全部免费模型。为避免误用付费额度，建议在配置中 blacklist 付费模型（本仓库 README 上方配置示例已含）：
+
+```json
+{
+  "provider": {
+    "cloudflare-workers-ai": {
+      "blacklist": [
+        "@cf/deepseek-ai/deepseek-v4-flash-0731",
+        "@cf/deepseek-ai/deepseek-v4-pro-0813",
+        "@cf/zai-org/glm-5.2",
+        "@cf/moonshotai/kimi-k2.6",
+        "@cf/moonshotai/kimi-k2.7-code"
+      ]
+    }
+  }
+}
+```
+
+```bash
+# CLI
+opencode run -m cloudflare-workers-ai/@cf/openai/gpt-oss-120b "你好"
+opencode run -m cloudflare-workers-ai/@cf/qwen/qwen2.5-coder-32b-instruct "你好"
+```
 
 ### 配置
 
