@@ -45,24 +45,24 @@ pi install npm:pi-opencode-native
 
 ### 1. API key
 
+> 从 **1.0.4** 起，每个 provider 都在注册时自声明 `apiKey: "public"`（匿名占位），pi 因此始终视其为已配置 key，**无需再手动编辑 `~/.pi/agent/auth.json`**，装完即可用。`public` 只是占位，实际请求按下面的优先级解析真实 key。
+
 key 解析优先级（从高到低）：
 
-1. **环境变量 `OPENCODE_API_KEY`**（推荐，不把 key 写进配置文件）
-2. `~/.pi/agent/auth.json` 中 `opencode-fix.key`（**非** `public` 的值）
-3. 兜底匿名 `public`
+1. **环境变量**（推荐，不把 key 写进配置文件）：`OPENCODE_API_KEY`、`SENSENOVA_API_KEY`、`SILICONFLOW_API_KEY`、`MODELSCOPE_API_KEY`、`NVIDIA_NIM_API_KEY`、`CLOUDFLARE_API_KEY`（+ `CLOUDFLARE_ACCOUNT_ID`）
+2. `~/.pi/agent/auth.json` 中对应 provider 条目（**非** `public` 的值）
+3. 兜底匿名 `public`（仅 Zen 免费模型可用，其余 provider 需真实 key）
 
 ```bash
 # 方式 A：环境变量（推荐，账号 key）
 export OPENCODE_API_KEY=sk-xxx
 
-# 方式 B：auth.json（public = 匿名）
+# 方式 B（可选）：auth.json 存真实 key
 cat ~/.pi/agent/auth.json
-# { "opencode-fix": { "type": "api_key", "key": "public" } }
+# { "opencode-fix": { "type": "api_key", "key": "sk-xxx" } }
 ```
 
-> ⚠️ auth.json 中 `key: "public"` 是匿名占位，会被忽略（走兜底）；要指定账号 key 请用环境变量或把 `public` 换成真实 key。
->
-> ⚠️ **不要删除 auth.json 中的 `opencode-fix` 条目**——pi 在找不到该 provider 的 key 时会直接跳过这个扩展（failover 到内置 provider），导致扩展完全不生效。
+> ⚠️ `auth.json` 条目现在完全可选。若想为某个 provider 存真实 key，写入非 `public` 的值即可（优先级高于匿名兜底、低于环境变量）。Zen 免费模型不写任何 key 也能匿名使用。
 
 ### 2. 默认 provider（可选，推荐）
 
@@ -104,7 +104,7 @@ TUI 内 **Ctrl+P** 循环切换模型。
 
 ## 额外供应商
 
-除 Zen 免费模型外，本扩展还注册了 **5 个第三方免费/低成本供应商**。所有 provider 的 key 解析优先级一致：环境变量 → auth.json 中非 `public` 的 key → 匿名占位（`key: "public"` 会被忽略）。auth.json 中相应条目**不要删除**——pi 找不到该 provider 的 key 时会直接跳过扩展。
+除 Zen 免费模型外，本扩展还注册了 **5 个第三方免费/低成本供应商**。所有 provider 的 key 解析优先级一致：环境变量 → auth.json 中非 `public` 的 key → 匿名占位（1.0.4 起 provider 自注册 `apiKey: "public"`，pi 视为已配置，装完即显示；`public` 本身会被忽略走兜底）。
 
 ### SenseNova（商汤日日新）
 
@@ -473,6 +473,7 @@ opencode 原生方式不经过 `cleanBody`，但实测标准对话/工具调用�
 8. **DeepSeek V4 思维模式回传**：`deepseek-v4-flash-free` 思维模式开启时，DeepSeek 要求历史中 assistant 消息（尤其带 `tool_calls` 的轮次）必须回传 `reasoning_content`，缺失即报 `400 The reasoning_content in the thinking mode must be passed back to the API`。本扩展已把 pi 内部 thinking 块转回顶层 `reasoning_content` 字段随历史回传（空字符串也保留，工具调用轮次强制携带）。
 9. **npm 发布与 token 安全**：发布到 npm 需要账号 2FA。建议在 npm 网页生成 granular access token 并勾选 *Bypass 2FA on publish*，存为环境变量 `NPM_BYPASS_TOKEN`，再写入本地 `~/.npmrc` 的 `_authToken` 供 `npm publish` 使用（免验证码）。**`~/.npmrc` 内含可绕过 2FA 的明文 token，切勿提交到任何仓库或分享给他人**；若将 home 配置纳入 git 管理（dotfiles 仓库），务必先把 `~/.npmrc` 加入 `.gitignore`。
 10. **package.json 的 UTF-8 BOM（1.0.2 已修复）**：1.0.0/1.0.1 发布到 npm 的 `package.json` 首行带 UTF-8 BOM。pi 的 `readPiManifest` 用裸 `JSON.parse` 解析该文件，BOM 会令解析抛错并被静默忽略，导致整个扩展不加载（`/model` 里看不到 `opencode-fix`/`sensenova` 等任何 provider）。1.0.2 起已去掉 BOM；若 `pi install` 后看不到 provider，请 `pi update --extensions` 确认装的是 1.0.2+。pi 侧的健壮性问题已提交：[earendil-works/pi#8310](https://github.com/earendil-works/pi/issues/8310)。
+11. **无需手动配置 auth.json（1.0.4 起）**：旧版要求 `~/.pi/agent/auth.json` 中为每个 provider 添加 `{ "type": "api_key", "key": "public" }` 条目，否则 pi 找不到 key 会直接跳过扩展（报 `No API key found for <provider>`）。1.0.4 起每个 provider 自注册 `apiKey: "public"`（匿名占位），pi 视其为已配置 key，装完即可见可用；要使用账号 key 直接用环境变量即可。重装插件后无需再改 auth.json。
 
 ## License
 

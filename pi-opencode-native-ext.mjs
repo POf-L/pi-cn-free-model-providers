@@ -442,6 +442,7 @@ async function run(stream, output, model, context, options, cfg) {
 export default async function (pi) {
   pi.registerProvider("opencode-fix", {
     name: "OpenCode Zen (native headers)",
+    apiKey: "public",
     baseUrl: "https://opencode.ai/zen/v1",
     api: "openai-completions",
     streamSimple: streamOpenCode,
@@ -520,6 +521,7 @@ export default async function (pi) {
   });
   pi.registerProvider("sensenova", {
     name: "SenseNova (商汤日日新)",
+    apiKey: "public",
     baseUrl: "https://token.sensenova.cn/v1",
     api: "openai-completions",
     streamSimple: streamSenseNova,
@@ -568,6 +570,7 @@ export default async function (pi) {
   });
   pi.registerProvider("siliconflow", {
     name: "硅基流动 (SiliconFlow)",
+    apiKey: "public",
     baseUrl: "https://api.siliconflow.cn/v1",
     api: "openai-completions",
     streamSimple: streamSiliconFlow,
@@ -596,6 +599,7 @@ export default async function (pi) {
   });
   pi.registerProvider("modelscope", {
     name: "魔塔社区 (ModelScope)",
+    apiKey: "public",
     baseUrl: "https://api-inference.modelscope.cn/v1",
     api: "openai-completions",
     streamSimple: streamModelScope,
@@ -625,6 +629,7 @@ export default async function (pi) {
   });
   pi.registerProvider("nvidia", {
     name: "NVIDIA NIM",
+    apiKey: "public",
     baseUrl: "https://integrate.api.nvidia.com/v1",
     api: "openai-completions",
     streamSimple: streamNvidia,
@@ -643,6 +648,7 @@ export default async function (pi) {
   });
   pi.registerProvider("cloudflare", {
     name: "Cloudflare Workers AI (免费额度)",
+    apiKey: "public",
     baseUrl: "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
     api: "openai-completions",
     streamSimple: streamCloudflare,
