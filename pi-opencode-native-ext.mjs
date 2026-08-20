@@ -313,6 +313,7 @@ function makeOpenAIStream(baseUrl, envKey, opts = {}) {
       maxTokens,
     };
     if (opts.cleanBody) cfg.cleanBody = opts.cleanBody;
+    if (opts.enableThinking) cfg.enableThinking = true;
     run(stream, output, model, context, options, cfg);
     return stream;
   };
@@ -367,6 +368,20 @@ const streamModelScope = makeOpenAIStream("https://api-inference.modelscope.cn/v
 });
 const streamNvidia = makeOpenAIStream("https://integrate.api.nvidia.com/v1", "NVIDIA_NIM_API_KEY");
 
+// Agnes AI — OpenAI-compatible gateway (apihub.agnes-ai.com = 国际站,
+// api.agnes-ai.cn = 中国站). Same model lineup on both. Supports
+// image_url input (base64 data URLs work), tool calling, and thinking mode
+// via chat_template_kwargs.enable_thinking (wired to pi's thinkingLevel).
+// https://www.agnes-ai.com/zh-Hans/docs/overview
+const streamAgnes = makeOpenAIStream("https://apihub.agnes-ai.com/v1", "AGNES_API_KEY", {
+  maxTokens: 65536,
+  enableThinking: true,
+});
+const streamAgnesCN = makeOpenAIStream("https://api.agnes-ai.cn/v1", "AGNES_CN_API_KEY", {
+  maxTokens: 65536,
+  enableThinking: true,
+});
+
 // Cloudflare Workers AI — official OpenAI-compatible endpoint.
 // https://developers.cloudflare.com/workers-ai/configuration/open-ai-compatibility/
 // The account id is embedded in the URL path, so the base URL is built from
@@ -406,6 +421,12 @@ async function run(stream, output, model, context, options, cfg) {
       ...(options?.maxTokens ? { max_tokens: options.maxTokens } : { max_tokens: cfg.maxTokens }),
     };
     if (cfg.cleanBody) body = cfg.cleanBody(body);
+    // Thinking mode for providers that opt in via a gateway extension field
+    // (e.g. Agnes AI: chat_template_kwargs.enable_thinking). pi signals the
+    // requested level through options.thinkingLevel.
+    if (cfg.enableThinking && options?.thinkingLevel && options.thinkingLevel !== "off") {
+      body.chat_template_kwargs = { enable_thinking: true };
+    }
     const headers = {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
@@ -437,6 +458,53 @@ async function run(stream, output, model, context, options, cfg) {
     try { stream.end(); } catch {}
   }
 }
+
+// ── Agnes AI models (shared by international + China providers) ──
+// Text/chat models only; image/video generation models are not chat
+// completions and are intentionally not registered. Limits from:
+// https://wiki.agnes-ai.com/en/docs/agnes-25-flash.md (and agnes-20-flash.md)
+const AGNES_MODELS = [
+  {
+    id: "agnes-2.5-flash",
+    name: "Agnes 2.5 Flash",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 512000,
+    maxTokens: 65536,
+  },
+  {
+    id: "agnes-2.0-flash",
+    name: "Agnes 2.0 Flash",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 512000,
+    maxTokens: 65536,
+  },
+  {
+    id: "agnes-2.5-pro",
+    name: "Agnes 2.5 Pro",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: { input: 0.45, output: 0.9, cacheRead: 0.0038, cacheWrite: 0 },
+    contextWindow: 1048576,
+    maxTokens: 65536,
+  },
+  {
+    id: "agnes-2.5-pro-alpha",
+    name: "Agnes 2.5 Pro Alpha",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: { input: 0.45, output: 0.9, cacheRead: 0.0038, cacheWrite: 0 },
+    contextWindow: 1048576,
+    maxTokens: 65536,
+  },
+];
 
 // ── Extension entry ──
 export default async function (pi) {
@@ -734,5 +802,21 @@ export default async function (pi) {
         maxTokens: 65536,
       },
     ],
+  });
+  pi.registerProvider("agnes", {
+    name: "Agnes AI (国际站)",
+    apiKey: "public",
+    baseUrl: "https://apihub.agnes-ai.com/v1",
+    api: "openai-completions",
+    streamSimple: streamAgnes,
+    models: AGNES_MODELS,
+  });
+  pi.registerProvider("agnes-cn", {
+    name: "Agnes AI (中国站)",
+    apiKey: "public",
+    baseUrl: "https://api.agnes-ai.cn/v1",
+    api: "openai-completions",
+    streamSimple: streamAgnesCN,
+    models: AGNES_MODELS,
   });
 }

@@ -49,7 +49,7 @@ pi install npm:pi-opencode-native
 
 key 解析优先级（从高到低）：
 
-1. **环境变量**（推荐，不把 key 写进配置文件）：`OPENCODE_API_KEY`、`SENSENOVA_API_KEY`、`SILICONFLOW_API_KEY`、`MODELSCOPE_API_KEY`、`NVIDIA_NIM_API_KEY`、`CLOUDFLARE_API_KEY`（+ `CLOUDFLARE_ACCOUNT_ID`）
+1. **环境变量**（推荐，不把 key 写进配置文件）：`OPENCODE_API_KEY`、`SENSENOVA_API_KEY`、`SILICONFLOW_API_KEY`、`MODELSCOPE_API_KEY`、`NVIDIA_NIM_API_KEY`、`CLOUDFLARE_API_KEY`（+ `CLOUDFLARE_ACCOUNT_ID`）、`AGNES_API_KEY`、`AGNES_CN_API_KEY`
 2. `~/.pi/agent/auth.json` 中对应 provider 条目（**非** `public` 的值）
 3. 兜底匿名 `public`（仅 Zen 免费模型可用，其余 provider 需真实 key）
 
@@ -104,7 +104,7 @@ TUI 内 **Ctrl+P** 循环切换模型。
 
 ## 额外供应商
 
-除 Zen 免费模型外，本扩展还注册了 **5 个第三方免费/低成本供应商**。所有 provider 的 key 解析优先级一致：环境变量 → auth.json 中非 `public` 的 key → 匿名占位（1.0.4 起 provider 自注册 `apiKey: "public"`，pi 视为已配置，装完即显示；`public` 本身会被忽略走兜底）。
+除 Zen 免费模型外，本扩展还注册了 **7 个第三方免费/低成本供应商**。所有 provider 的 key 解析优先级一致：环境变量 → auth.json 中非 `public` 的 key → 匿名占位（1.0.4 起 provider 自注册 `apiKey: "public"`，pi 视为已配置，装完即显示；`public` 本身会被忽略走兜底）。
 
 ### SenseNova（商汤日日新）
 
@@ -194,6 +194,29 @@ pi -p --provider nvidia --model nvidia/openai/gpt-oss-120b "你好"
 | `openai/gpt-oss-120b` | OpenAI 开源权重模型 | 128K | 无每日上限 |
 
 > 更多模型可通过 `GET /v1/models` 查询（需有效 key），模型更新频繁，以官网为准。
+
+### Agnes AI（国际站 + 中国站）
+
+[Agnes AI](https://www.agnes-ai.com/zh-Hans/docs/overview) 的 OpenAI 兼容网关，国际站（`apihub.agnes-ai.com`）与中国站（`api.agnes-ai.cn`）各注册一个 provider，模型阵容一致。Flash 系当前限时免费（`$0 / 1M tokens`），Pro 系为付费推理模型。支持工具调用、图片理解（base64 data URL 实测可用）、思维模式（经 `chat_template_kwargs.enable_thinking` 开启，已接入 pi 的 `thinkingLevel`）；多轮历史回传 `reasoning_content` 实测兼容。
+
+```bash
+# 在 https://www.agnes-ai.com（国际）或 https://www.agnes-ai.cn（中国）申请 key
+export AGNES_API_KEY=sk-xxx      # 国际站
+export AGNES_CN_API_KEY=sk-xxx   # 中国站
+
+# 使用
+pi -p --provider agnes --model agnes/agnes-2.5-flash "你好"
+pi -p --provider agnes-cn --model agnes-cn/agnes-2.5-pro "你好"
+```
+
+| 模型 ID | 说明 | 上下文 | 限额/价格 |
+|---|---|---|---|
+| `agnes-2.5-flash` | 全量升级版：编码专项、agent 工作流、工具调用、图像理解 | 512K | 免费（限时） |
+| `agnes-2.0-flash` | 上一代快速模型（Claw-Eval 排名 #9） | 512K | 免费（限时） |
+| `agnes-2.5-pro` | 付费推理旗舰：高级编码、科学推理、长上下文、agent 终端任务 | 1M | $0.45/M 输入、$0.90/M 输出 |
+| `agnes-2.5-pro-alpha` | 打榜版付费推理模型（同上基准参考） | 1M | $0.45/M 输入、$0.90/M 输出 |
+
+> 图像/视频**生成**模型（`agnes-image-*`、`agnes-video-*`）与 chat completions 不兼容，未注册。
 
 ### Cloudflare Workers AI
 
@@ -430,6 +453,74 @@ opencode run -m cloudflare-workers-ai/@cf/qwen/qwen2.5-coder-32b-instruct "你�
           "cost": { "input": 0, "output": 0 }
         }
       }
+    },
+    "agnes": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Agnes AI (国际站)",
+      "options": {
+        "baseURL": "https://apihub.agnes-ai.com/v1",
+        "apiKey": "{env:AGNES_API_KEY}"
+      },
+      "models": {
+        "agnes-2.5-flash": {
+          "name": "Agnes 2.5 Flash",
+          "limit": { "context": 512000, "output": 65536 },
+          "reasoning": true, "tool_call": true, "attachment": true,
+          "cost": { "input": 0, "output": 0 }
+        },
+        "agnes-2.0-flash": {
+          "name": "Agnes 2.0 Flash",
+          "limit": { "context": 512000, "output": 65536 },
+          "reasoning": true, "tool_call": true, "attachment": true,
+          "cost": { "input": 0, "output": 0 }
+        },
+        "agnes-2.5-pro": {
+          "name": "Agnes 2.5 Pro",
+          "limit": { "context": 1048576, "output": 65536 },
+          "reasoning": true, "tool_call": true,
+          "cost": { "input": 0.45, "output": 0.9 }
+        },
+        "agnes-2.5-pro-alpha": {
+          "name": "Agnes 2.5 Pro Alpha",
+          "limit": { "context": 1048576, "output": 65536 },
+          "reasoning": true, "tool_call": true,
+          "cost": { "input": 0.45, "output": 0.9 }
+        }
+      }
+    },
+    "agnes-cn": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Agnes AI (中国站)",
+      "options": {
+        "baseURL": "https://api.agnes-ai.cn/v1",
+        "apiKey": "{env:AGNES_CN_API_KEY}"
+      },
+      "models": {
+        "agnes-2.5-flash": {
+          "name": "Agnes 2.5 Flash",
+          "limit": { "context": 512000, "output": 65536 },
+          "reasoning": true, "tool_call": true, "attachment": true,
+          "cost": { "input": 0, "output": 0 }
+        },
+        "agnes-2.0-flash": {
+          "name": "Agnes 2.0 Flash",
+          "limit": { "context": 512000, "output": 65536 },
+          "reasoning": true, "tool_call": true, "attachment": true,
+          "cost": { "input": 0, "output": 0 }
+        },
+        "agnes-2.5-pro": {
+          "name": "Agnes 2.5 Pro",
+          "limit": { "context": 1048576, "output": 65536 },
+          "reasoning": true, "tool_call": true,
+          "cost": { "input": 0.45, "output": 0.9 }
+        },
+        "agnes-2.5-pro-alpha": {
+          "name": "Agnes 2.5 Pro Alpha",
+          "limit": { "context": 1048576, "output": 65536 },
+          "reasoning": true, "tool_call": true,
+          "cost": { "input": 0.45, "output": 0.9 }
+        }
+      }
     }
   }
 }
@@ -443,6 +534,8 @@ opencode run -m sensenova/sensenova-6.7-flash-lite "你好"
 opencode run -m siliconflow/nex-agi/Nex-N2-Pro "你好"
 opencode run -m modelscope/Qwen/Qwen3-Coder-30B-A3B-Instruct "你好"
 opencode run -m nvidia/openai/gpt-oss-120b "你好"
+opencode run -m agnes/agnes-2.5-flash "你好"
+opencode run -m agnes-cn/agnes-2.5-flash "你好"
 
 # 设为默认模型
 opencode.json → "model": "sensenova/glm-5.2"
