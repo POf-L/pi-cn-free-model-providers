@@ -274,7 +274,7 @@ pi -p --provider cloudflare --model cloudflare/@cf/openai/gpt-oss-120b "你好"
 
 ### 如何选择
 
-5 个额外供应商全部免费模型统一对比（基准数据截至 2026-08，来源：官方技术报告 + 独立评测）：
+7 个额外供应商全部模型统一对比（基准数据截至 2026-08，来源：官方技术报告 + 独立评测）：
 
 | 供应商 | 模型 | 规模 | 上下文 | 能力定位 | 实测 |
 |---|---|---|---|---|---|
@@ -292,20 +292,26 @@ pi -p --provider cloudflare --model cloudflare/@cf/openai/gpt-oss-120b "你好"
 | Cloudflare | `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | 70B | 24K（实测） | 最强 Llama 3.3，上下文小 | ✅ |
 | Cloudflare | `@cf/qwen/qwen2.5-coder-32b-instruct` | 32B | 32K（实测） | 代码专用，工具调用为 XML 文本（非标准） | ⚠️ |
 | Cloudflare | `@cf/google/gemma-4-26b-a4b-it` | 26B MoE (4B 激活) | 128K | 多模态（文本+图像） | ✅ |
+| Agnes | `agnes-2.5-flash` | — | 512K | 免费 512K 长上下文：编码专项、agent 工作流、工具调用、图像理解；全量升级版 | ✅ |
+| Agnes | `agnes-2.0-flash` | — | 512K | 免费，上一代快速模型（Claw-Eval 排名 #9，Pass³ 60.9%） | ✅ |
+| Agnes | `agnes-2.5-pro` | — | **1M** | 付费推理旗舰：高级编码、科学推理、长上下文分析、agent 终端任务（Artificial Analysis 智能排名 #9/153，TerminalBench v2.1 67.0%，GPQA 87.6%）；$0.45/M 输入、$0.90/M 输出 | ✅ |
+| Agnes | `agnes-2.5-pro-alpha` | — | **1M** | 打榜版付费推理（基准数据同 pro，付费） | ✅ |
 
 **场景选择矩阵：**
 
 | 场景 | 选它 |
 |---|---|
 | 日常编码 / agent 开发（默认主力） | **硅基 Nex-N2-Pro**（免费 + 综合最强） |
-| 超长上下文 / 长程开发管线 | SenseNova `glm-5.2`（开箱即用）或魔塔 `DeepSeek-V4-Pro`（需开通额度） |
+| 免费长上下文（512K）/ 双站可选 | **Agnes `agnes-2.5-flash`**（国际站海外直连）或 `agnes-cn/agnes-2.5-flash`（中国站国内直连，速度更稳） |
+| 超长上下文 / 长程开发管线 | SenseNova `glm-5.2`（开箱即用）、魔塔 `DeepSeek-V4-Pro`（需开通额度）或 **Agnes `agnes-2.5-pro`**（1M，付费） |
+| 付费强推理（编码/科学/终端） | **Agnes `agnes-2.5-pro`**（1M 上下文，AA 智能榜 #9） |
 | 中文任务 | Nex-N2-Pro 或 DeepSeek-V4-Pro（**勿用 GPT-OSS-120B**） |
-| 多模态（文本+图像） | SenseNova `sensenova-6.8-flash-lite` 或 Cloudflare `gemma-4-26b` |
+| 多模态（文本+图像） | SenseNova `sensenova-6.8-flash-lite`、Cloudflare `gemma-4-26b` 或 Agnes `agnes-2.5-flash` |
 | 英文数学、结构化输出 | **NVIDIA GPT-OSS-120B** |
 | 海外网络兜底 / agent 工作流 | **Cloudflare `glm-4.7-flash`**（额度独立，工具调用完整兼容） |
 | 限流兜底、轻量快速 | ModelScope Qwen3-Coder-30B / 硅基 Qwen3-8B |
 
-**推荐组合**：主力 `siliconflow/nex-agi/Nex-N2-Pro` + 兜底 `modelscope/Qwen/Qwen3-Coder-30B-A3B-Instruct`（额度独立，主力限流时顶上）；长上下文/多模态需求切 SenseNova，特殊场景按需切换。
+**推荐组合**：主力 `siliconflow/nex-agi/Nex-N2-Pro` + 兜底 `modelscope/Qwen/Qwen3-Coder-30B-A3B-Instruct`（额度独立，主力限流时顶上）；国内长上下文/双通道用 `agnes-cn/agnes-2.5-flash`，长上下文推理/多模态需求切 SenseNova/Agnes，特殊场景按需切换。
 
 ⚠️ 各平台免费额度均注明 "limited time"，模型可能随时下架/改名/转付费（NVIDIA 实测已下架 3 个模型），且免费期会话数据可能被用于改进模型，**勿发敏感内容、勿当生产依赖**。
 
