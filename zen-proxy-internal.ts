@@ -9,11 +9,20 @@ import type { Config, Plugin } from "@opencode-ai/plugin"
  * the response/SSE stream. The proxy-only transport features (CONNECT proxy,
  * chunked encoding and SSE keepalive) cannot be controlled from a provider
  * fetch hook and remain the responsibility of the HTTP proxy implementation.
+ *
+ * It applies to the OFFICIAL "opencode" (Zen) provider: requests routed through
+ * it get their session/project/request identity headers rewritten and their
+ * body stripped of user/metadata before reaching opencode.ai/zen/v1.
+ *
+ * Identity rotation is ROUND-BASED, not time-based. OpenCode runs agentically:
+ * the user types one message, then the agent keeps executing (many LLM/tool
+ * requests) until it stops. All requests belonging to one user message share a
+ * single fake identity; a fresh identity is only minted when the user sends the
+ * next message (detected via the "chat.message" hook).
  */
 
-const PROVIDER_ID = "zenproxy"
-const ZEN_API_BASE = "https://opencode.ai/zen/v1"
-const ID_ROTATION_MS = 10 * 60 * 1000
+// The official OpenCode "opencode" provider (Zen), not a custom provider.
+const PROVIDER_ID = "opencode"
 
 const SESSION_HEADERS = [
   "x-opencode-session",
@@ -42,28 +51,24 @@ function randomID(prefix: string): string {
   return prefix + randomUUID().replaceAll("-", "").slice(0, 22)
 }
 
-/** A process-local mapper matching zen_proxy.py's rotation semantics. */
+/**
+ * A process-local mapper. Identity is stable for one conversation round and is
+ * rotated only when the user sends a new message (see the "chat.message" hook).
+ */
 class IdentityMapper {
-  private epoch = -1
   private readonly sessions = new Map<string, string>()
   private readonly projects = new Map<string, string>()
+  private requestID: string | null = null
 
-  private currentEpoch(): number {
-    return Math.floor(Date.now() / ID_ROTATION_MS)
-  }
-
-  private rotateIfNeeded() {
-    const epoch = this.currentEpoch()
-    if (epoch !== this.epoch) {
-      this.epoch = epoch
-      this.sessions.clear()
-      this.projects.clear()
-    }
+  /** Start a new round: drop all mappings so the next request gets fresh IDs. */
+  rotate() {
+    this.sessions.clear()
+    this.projects.clear()
+    this.requestID = null
   }
 
   session(realID: string): string {
     if (!realID) return realID
-    this.rotateIfNeeded()
     let fakeID = this.sessions.get(realID)
     if (!fakeID) {
       fakeID = randomID("ses_")
@@ -74,7 +79,6 @@ class IdentityMapper {
 
   project(realID: string): string {
     if (!realID) return realID
-    this.rotateIfNeeded()
     let fakeID = this.projects.get(realID)
     if (!fakeID) {
       fakeID = randomID("proj_")
@@ -84,8 +88,10 @@ class IdentityMapper {
   }
 
   request(): string {
-    // zen_proxy.py intentionally gives every request a fresh request ID.
-    return randomID("req_")
+    // A single request id shared by every request the agent makes within one
+    // round; only changes when the round rotates.
+    if (!this.requestID) this.requestID = randomID("req_")
+    return this.requestID
   }
 }
 
@@ -121,7 +127,7 @@ function sanitizeHeaders(headers: Headers): Headers {
 
   // Use one scope for all session headers, just like the Python mapper. The
   // first available value is the scope key; every present session header gets
-  // a stable fake value during the current ten-minute rotation window.
+  // a stable fake value for the current conversation round.
   const scopeID =
     cleaned.get("x-session-id") ??
     cleaned.get("x-session-affinity") ??
@@ -189,11 +195,15 @@ function createSanitizingFetch(): typeof fetch {
 }
 
 function configureZenProvider(config: Config, cleanFetch: typeof fetch) {
-  const provider = config.provider?.[PROVIDER_ID]
-  if (!provider) return
+  // The official "opencode" (Zen) provider is built-in; it may not be present
+  // in config.provider unless the user overrode it. Create/merge the entry so
+  // our sanitizing fetch applies to the official channel as well.
+  config.provider ??= {}
+  const provider = (config.provider[PROVIDER_ID] ??= {})
 
   provider.options ??= {}
-  provider.options.baseURL = ZEN_API_BASE
+  // baseURL is intentionally left untouched: the official provider already
+  // defaults to https://opencode.ai/zen/v1 and the user may have overridden it.
   provider.options.fetch = cleanFetch
   provider.options.transformRequestBody = sanitizeRequestBody
   // Long reasoning/SSE responses must not be cut off by a client timeout.
@@ -202,10 +212,20 @@ function configureZenProvider(config: Config, cleanFetch: typeof fetch) {
 
 export default (async () => {
   const cleanFetch = createSanitizingFetch()
+  let lastUserMessageID: string | null = null
 
   return {
     config: async (config) => {
       configureZenProvider(config, cleanFetch)
+    },
+
+    "chat.message": async (input) => {
+      // A new user message starts a new round: rotate the fake identity once.
+      // Dedupe by messageID so re-fires of the same message don't rotate again
+      // in the middle of the agent's continuous execution.
+      if (input.messageID && input.messageID === lastUserMessageID) return
+      lastUserMessageID = input.messageID ?? null
+      identityMapper.rotate()
     },
 
     "chat.headers": async (input, output) => {

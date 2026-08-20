@@ -1,0 +1,15 @@
+{
+  "name": "zen_proxy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenCode Zen session-sanitizing proxy (request cleaning plugin + local proxy)",
+  "scripts": {
+    "test": "tsx test/test-internal.mjs"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.18.19",
+    "@types/node": "^26.2.0",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
+  }
+}
