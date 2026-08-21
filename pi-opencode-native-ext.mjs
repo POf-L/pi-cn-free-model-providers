@@ -506,76 +506,316 @@ const AGNES_MODELS = [
   },
 ];
 
+// ── Curated model allowlists ──
+// Models we vouch for: verified free tier + correct metadata (contextWindow,
+// maxTokens, reasoning, input, cost). At load each list is intersected with
+// the provider's live /v1/models so models that leave the free tier or get
+// renamed are auto-removed (drift detection). New free models are still added
+// here manually after confirming them on the provider's pricing page, because
+// the live /v1/models endpoints expose no pricing and paid models keep their
+// "-free" ids (e.g. deepseek-v4-flash-free) — auto-adding would risk exposing
+// paid models as free.
+const ZEN_FREE_MODELS = [
+  {
+    id: "mimo-v2.5-free",
+    name: "MiMo-V2.5 Free",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 200000,
+    maxTokens: 128000,
+  },
+  {
+    id: "hy3-free",
+    name: "Hy3 Free",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 200000,
+    maxTokens: 128000,
+  },
+  {
+    id: "laguna-s-2.1-free",
+    name: "Laguna S 2.1 Free",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 200000,
+    maxTokens: 128000,
+  },
+  {
+    id: "nemotron-3-ultra-free",
+    name: "Nemotron 3 Ultra Free",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 1000000,
+    maxTokens: 128000,
+  },
+  {
+    id: "nemotron-3.5-lightning-free",
+    name: "Nemotron 3.5 Lightning Free",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 1000000,
+    maxTokens: 128000,
+  },
+  {
+    id: "big-pickle",
+    name: "Big Pickle",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 200000,
+    maxTokens: 128000,
+  },
+];
+const SENSENOVA_MODELS = [
+  {
+    id: "sensenova-6.7-flash-lite",
+    name: "SenseNova 6.7 Flash-Lite",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 262144,
+    maxTokens: 65536,
+  },
+  {
+    id: "sensenova-6.8-flash-lite",
+    name: "SenseNova 6.8 Flash-Lite",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 262144,
+    maxTokens: 65536,
+  },
+  {
+    id: "deepseek-v4-flash",
+    name: "DeepSeek V4 Flash (via SenseNova)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 1048576,
+    maxTokens: 65536,
+  },
+  {
+    id: "glm-5.2",
+    name: "GLM-5.2 (via SenseNova)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 1048576,
+    maxTokens: 131072,
+  },
+];
+const SILICONFLOW_MODELS = [
+  {
+    id: "nex-agi/Nex-N2-Pro",
+    name: "Nex-N2-Pro (397B MoE, 免费)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 262144,
+    maxTokens: 65536,
+  },
+  {
+    id: "Qwen/Qwen3-8B",
+    name: "Qwen3-8B (免费)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 262144,
+    maxTokens: 65536,
+  },
+];
+const MODELSCOPE_MODELS = [
+  {
+    id: "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+    name: "Qwen3-Coder-30B (via ModelScope)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 65536,
+  },
+  // DeepSeek-V4-Pro 存在但默认配额不足(429)，需在 ModelScope 控制台开通对应模型额度
+  {
+    id: "deepseek-ai/DeepSeek-V4-Pro",
+    name: "DeepSeek V4 Pro (via ModelScope, 需开通)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 1048576,
+    maxTokens: 65536,
+  },
+];
+const NVIDIA_MODELS = [
+  {
+    id: "openai/gpt-oss-120b",
+    name: "GPT-OSS 120B (via NVIDIA NIM)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 65536,
+  },
+];
+const CLOUDFLARE_MODELS = [
+  {
+    id: "@cf/openai/gpt-oss-120b",
+    name: "GPT-OSS 120B (via Cloudflare)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 65536,
+  },
+  {
+    id: "@cf/openai/gpt-oss-20b",
+    name: "GPT-OSS 20B (via Cloudflare)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 65536,
+  },
+  {
+    id: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    name: "Llama 3.3 70B (via Cloudflare)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 24000,
+    maxTokens: 8192,
+  },
+  {
+    id: "@cf/qwen/qwen3-30b-a3b-fp8",
+    name: "Qwen3 30B A3B (via Cloudflare)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 32768,
+    maxTokens: 8192,
+  },
+  {
+    id: "@cf/qwen/qwen2.5-coder-32b-instruct",
+    name: "Qwen2.5 Coder 32B (via Cloudflare)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 32768,
+    maxTokens: 8192,
+  },
+  {
+    id: "@cf/google/gemma-4-26b-a4b-it",
+    name: "Gemma 4 26B (via Cloudflare)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 65536,
+  },
+  {
+    id: "@cf/zai-org/glm-4.7-flash",
+    name: "GLM-4.7-Flash (via Cloudflare)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 65536,
+  },
+  {
+    id: "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
+    name: "DeepSeek R1 Distill Qwen 32B (via Cloudflare)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 80000,
+    maxTokens: 65536,
+  },
+];
+
+// ── Live model-list drift detection ──
+// Fetch a provider's /v1/models and return the set of ids. Best-effort: any
+// non-OK status, unexpected shape, or network error returns null so callers
+// fall back to the curated allowlist (registration never breaks).
+async function fetchLiveModelIds(url, headers) {
+  try {
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(8000) });
+    if (!res.ok) return null;
+    const json = await res.json();
+    const data = Array.isArray(json) ? json : json?.data;
+    if (!Array.isArray(data)) return null;
+    return new Set(data.map((m) => m.id ?? m.name).filter(Boolean));
+  } catch {
+    return null;
+  }
+}
+function authHeader(envKey) {
+  return { Authorization: `Bearer ${process.env[envKey] ?? "public"}` };
+}
+// Intersect curated with live ids; drop models no longer present upstream.
+// Never auto-adds: live /v1/models exposes no pricing, and paid models keep
+// "-free" ids, so adding unknowns would risk surfacing paid models as free.
+async function filterToLive(curated, url, headers) {
+  const live = await fetchLiveModelIds(url, headers);
+  if (!live) return curated;
+  const kept = curated.filter((m) => live.has(m.id));
+  return kept.length ? kept : curated;
+}
+
 // ── Extension entry ──
 export default async function (pi) {
+  // Drift detection: intersect each curated allowlist with the provider's
+  // live /v1/models. Models that left the free tier / were renamed are dropped
+  // automatically. Fetch failures fall back to the curated list so registration
+  // never breaks. We never auto-add (see filterToLive comment above).
+  const [zenModels, sensenovaModels, siliconflowModels, modelscopeModels, nvidiaModels, agnesModels] = await Promise.all([
+    filterToLive(ZEN_FREE_MODELS, "https://opencode.ai/zen/v1/models", {
+      ...OPENCODE_STATIC_HEADERS,
+      Authorization: `Bearer ${process.env.OPENCODE_API_KEY ?? "public"}`,
+    }),
+    filterToLive(SENSENOVA_MODELS, "https://token.sensenova.cn/v1/models", authHeader("SENSENOVA_API_KEY")),
+    filterToLive(SILICONFLOW_MODELS, "https://api.siliconflow.cn/v1/models", authHeader("SILICONFLOW_API_KEY")),
+    filterToLive(MODELSCOPE_MODELS, "https://api-inference.modelscope.cn/v1/models", authHeader("MODELSCOPE_API_KEY")),
+    filterToLive(NVIDIA_MODELS, "https://integrate.api.nvidia.com/v1/models", authHeader("NVIDIA_NIM_API_KEY")),
+    filterToLive(AGNES_MODELS, "https://apihub.agnes-ai.com/v1/models", authHeader("AGNES_API_KEY")),
+  ]);
+  // Cloudflare has no anonymous /v1/models (account-scoped search endpoint);
+  // paid models are excluded via the opencode blacklist instead. Keep curated.
+  const cloudflareModels = CLOUDFLARE_MODELS;
+
   pi.registerProvider("opencode-fix", {
     name: "OpenCode Zen (native headers)",
     apiKey: "public",
     baseUrl: "https://opencode.ai/zen/v1",
     api: "openai-completions",
     streamSimple: streamOpenCode,
-    models: [
-      {
-        id: "mimo-v2.5-free",
-        name: "MiMo-V2.5 Free",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 200000,
-        maxTokens: 128000,
-      },
-      {
-        id: "hy3-free",
-        name: "Hy3 Free",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 200000,
-        maxTokens: 128000,
-      },
-      {
-        id: "laguna-s-2.1-free",
-        name: "Laguna S 2.1 Free",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 200000,
-        maxTokens: 128000,
-      },
-      {
-        id: "nemotron-3-ultra-free",
-        name: "Nemotron 3 Ultra Free",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 1000000,
-        maxTokens: 128000,
-      },
-      {
-        id: "nemotron-3.5-lightning-free",
-        name: "Nemotron 3.5 Lightning Free",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 1000000,
-        maxTokens: 128000,
-      },
-      {
-        id: "big-pickle",
-        name: "Big Pickle",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 200000,
-        maxTokens: 128000,
-      },
-    ],
+    models: zenModels,
   });
   pi.registerProvider("sensenova", {
     name: "SenseNova (商汤日日新)",
@@ -583,48 +823,7 @@ export default async function (pi) {
     baseUrl: "https://token.sensenova.cn/v1",
     api: "openai-completions",
     streamSimple: streamSenseNova,
-    models: [
-      {
-        id: "sensenova-6.7-flash-lite",
-        name: "SenseNova 6.7 Flash-Lite",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text", "image"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 262144,
-        maxTokens: 65536,
-      },
-      {
-        id: "sensenova-6.8-flash-lite",
-        name: "SenseNova 6.8 Flash-Lite",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text", "image"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 262144,
-        maxTokens: 65536,
-      },
-      {
-        id: "deepseek-v4-flash",
-        name: "DeepSeek V4 Flash (via SenseNova)",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 1048576,
-        maxTokens: 65536,
-      },
-      {
-        id: "glm-5.2",
-        name: "GLM-5.2 (via SenseNova)",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 1048576,
-        maxTokens: 131072,
-      },
-    ],
+    models: sensenovaModels,
   });
   pi.registerProvider("siliconflow", {
     name: "硅基流动 (SiliconFlow)",
@@ -632,28 +831,7 @@ export default async function (pi) {
     baseUrl: "https://api.siliconflow.cn/v1",
     api: "openai-completions",
     streamSimple: streamSiliconFlow,
-    models: [
-      {
-        id: "nex-agi/Nex-N2-Pro",
-        name: "Nex-N2-Pro (397B MoE, 免费)",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text", "image"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 262144,
-        maxTokens: 65536,
-      },
-      {
-        id: "Qwen/Qwen3-8B",
-        name: "Qwen3-8B (免费)",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 262144,
-        maxTokens: 65536,
-      },
-    ],
+    models: siliconflowModels,
   });
   pi.registerProvider("modelscope", {
     name: "魔塔社区 (ModelScope)",
@@ -661,29 +839,7 @@ export default async function (pi) {
     baseUrl: "https://api-inference.modelscope.cn/v1",
     api: "openai-completions",
     streamSimple: streamModelScope,
-    models: [
-      {
-        id: "Qwen/Qwen3-Coder-30B-A3B-Instruct",
-        name: "Qwen3-Coder-30B (via ModelScope)",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 131072,
-        maxTokens: 65536,
-      },
-      // DeepSeek-V4-Pro 存在但默认配额不足(429)，需在 ModelScope 控制台开通对应模型额度
-      {
-        id: "deepseek-ai/DeepSeek-V4-Pro",
-        name: "DeepSeek V4 Pro (via ModelScope, 需开通)",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 1048576,
-        maxTokens: 65536,
-      },
-    ],
+    models: modelscopeModels,
   });
   pi.registerProvider("nvidia", {
     name: "NVIDIA NIM",
@@ -691,18 +847,7 @@ export default async function (pi) {
     baseUrl: "https://integrate.api.nvidia.com/v1",
     api: "openai-completions",
     streamSimple: streamNvidia,
-    models: [
-      {
-        id: "openai/gpt-oss-120b",
-        name: "GPT-OSS 120B (via NVIDIA NIM)",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 131072,
-        maxTokens: 65536,
-      },
-    ],
+    models: nvidiaModels,
   });
   pi.registerProvider("cloudflare", {
     name: "Cloudflare Workers AI (免费额度)",
@@ -710,88 +855,7 @@ export default async function (pi) {
     baseUrl: "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
     api: "openai-completions",
     streamSimple: streamCloudflare,
-    models: [
-      {
-        id: "@cf/openai/gpt-oss-120b",
-        name: "GPT-OSS 120B (via Cloudflare)",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 131072,
-        maxTokens: 65536,
-      },
-      {
-        id: "@cf/openai/gpt-oss-20b",
-        name: "GPT-OSS 20B (via Cloudflare)",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 131072,
-        maxTokens: 65536,
-      },
-      {
-        id: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-        name: "Llama 3.3 70B (via Cloudflare)",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 24000,
-        maxTokens: 8192,
-      },
-      {
-        id: "@cf/qwen/qwen3-30b-a3b-fp8",
-        name: "Qwen3 30B A3B (via Cloudflare)",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 32768,
-        maxTokens: 8192,
-      },
-      {
-        id: "@cf/qwen/qwen2.5-coder-32b-instruct",
-        name: "Qwen2.5 Coder 32B (via Cloudflare)",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 32768,
-        maxTokens: 8192,
-      },
-      {
-        id: "@cf/google/gemma-4-26b-a4b-it",
-        name: "Gemma 4 26B (via Cloudflare)",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 131072,
-        maxTokens: 65536,
-      },
-      {
-        id: "@cf/zai-org/glm-4.7-flash",
-        name: "GLM-4.7-Flash (via Cloudflare)",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 131072,
-        maxTokens: 65536,
-      },
-      {
-        id: "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
-        name: "DeepSeek R1 Distill Qwen 32B (via Cloudflare)",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 80000,
-        maxTokens: 65536,
-      },
-    ],
+    models: cloudflareModels,
   });
   pi.registerProvider("agnes", {
     name: "Agnes AI (国际站)",
@@ -799,7 +863,7 @@ export default async function (pi) {
     baseUrl: "https://apihub.agnes-ai.com/v1",
     api: "openai-completions",
     streamSimple: streamAgnes,
-    models: AGNES_MODELS,
+    models: agnesModels,
   });
   pi.registerProvider("agnes-cn", {
     name: "Agnes AI (中国站)",
@@ -807,6 +871,6 @@ export default async function (pi) {
     baseUrl: "https://api.agnes-ai.cn/v1",
     api: "openai-completions",
     streamSimple: streamAgnesCN,
-    models: AGNES_MODELS,
+    models: agnesModels,
   });
 }
