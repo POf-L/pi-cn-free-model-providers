@@ -516,16 +516,6 @@ export default async function (pi) {
     streamSimple: streamOpenCode,
     models: [
       {
-        id: "deepseek-v4-flash-free",
-        name: "DeepSeek V4 Flash Free",
-        api: "openai-completions",
-        reasoning: true,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 200000,
-        maxTokens: 128000,
-      },
-      {
         id: "mimo-v2.5-free",
         name: "MiMo-V2.5 Free",
         api: "openai-completions",

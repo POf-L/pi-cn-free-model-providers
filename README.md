@@ -1,6 +1,6 @@
 # pi-opencode-native
 
-让 [pi](https://github.com/Codeks/pi)（AI 编码助手 CLI）通过原生通道调用 **OpenCode Zen 免费模型**（`deepseek-v4-flash-free` 等 7 个），解决第三方客户端直接调用时遭遇的 **429 FreeUsageLimitError** 限流问题。
+让 [pi](https://github.com/Codeks/pi)（AI 编码助手 CLI）通过原生通道调用 **OpenCode Zen 免费模型**（6 个），解决第三方客户端直接调用时遭遇的 **429 FreeUsageLimitError** 限流问题。
 
 ## 问题背景
 
@@ -71,7 +71,7 @@ cat ~/.pi/agent/auth.json
 ```json
 {
   "defaultProvider": "opencode-fix",
-  "defaultModel": "deepseek-v4-flash-free"
+  "defaultModel": "hy3-free"
 }
 ```
 
@@ -92,7 +92,6 @@ pi --model opencode-fix/hy3-free
 
 | 模型 ID | 说明 |
 |---|---|
-| `deepseek-v4-flash-free` | 日常编码首选，快 |
 | `big-pickle` | 匿名 stealth 模型（社区确认底层≈DeepSeek V4 Flash） |
 | `hy3-free` | 复杂/终端类任务 |
 | `laguna-s-2.1-free` | 长时程 agent 编码 |
@@ -562,14 +561,14 @@ opencode 原生方式不经过 `cleanBody`，但实测标准对话/工具调用�
 
 ## 注意事项
 
-1. **模型歧义**：若机器上也配置了 pi 内置 `opencode` provider 且带 key，裸 `--model deepseek-v4-flash-free` 会报 "ambiguous across providers"。解决：显式 `--provider opencode-fix`，或删除内置 opencode 的 key，或将 defaultProvider 设为 `opencode-fix`。
+1. **模型歧义**：若机器上也配置了 pi 内置 `opencode` provider 且带 key，裸 `--model hy3-free` 等模型 ID 会报 "ambiguous across providers"。解决：显式 `--provider opencode-fix`，或删除内置 opencode 的 key，或将 defaultProvider 设为 `opencode-fix`。
 2. **限流是共享的**：匿名 `public` key 的免费额度是全 Zen 用户共享的（社区实测约 200 请求/天兜底，官方未公布固定配额），到达后返回 429 `FreeUsageLimitError`，需等待重置。人越多额度越紧张。
 3. **UA 门可能变化**：本扩展写死 `User-Agent: opencode/1.15.5`。OpenCode 官方若调整版本号或免费门控策略，免费通道可能失效，需同步更新本文件中的 `OPENCODE_STATIC_HEADERS`。
 4. **数据条款**：免费模型的免费期内，**提交的数据可能被用于改进模型**（官方隐私声明明确例外）。切勿发送敏感/机密内容。`nemotron-*` 为 NVIDIA 试用端点，禁止提交个人或机密数据，会话会被记录。
 5. **免费是限时的**：官方措辞为 "available for a limited time"，模型可能随时下架、改名或转为付费，不适合作为生产依赖。
 6. **单文件可审计**：整个扩展就是一个 `.mjs` 文件，使用前建议通读确认无异常行为。
 7. **代理会导致 500**：Zen API 请求**不能走 HTTP 代理**（实测经 v2rayN/Clash 等代理转发返回 500 Internal server error，直连正常）。若系统全局代理已开启（Windows WinINET），node/bun 的 fetch 默认不读系统代理所以不受影响，但请勿为此扩展显式设置 `HTTPS_PROXY`/`HTTP_PROXY` 环境变量指向代理。
-8. **DeepSeek V4 思维模式回传**：`deepseek-v4-flash-free` 思维模式开启时，DeepSeek 要求历史中 assistant 消息（尤其带 `tool_calls` 的轮次）必须回传 `reasoning_content`，缺失即报 `400 The reasoning_content in the thinking mode must be passed back to the API`。本扩展已把 pi 内部 thinking 块转回顶层 `reasoning_content` 字段随历史回传（空字符串也保留，工具调用轮次强制携带）。
+8. **DeepSeek V4 思维模式回传**：`deepseek-v4-flash`（通过 SenseNova 等）思维模式开启时，DeepSeek 要求历史中 assistant 消息（尤其带 `tool_calls` 的轮次）必须回传 `reasoning_content`，缺失即报 `400 The reasoning_content in the thinking mode must be passed back to the API`。本扩展已把 pi 内部 thinking 块转回顶层 `reasoning_content` 字段随历史回传（空字符串也保留，工具调用轮次强制携带）。
 9. **npm 发布与 token 安全**：发布到 npm 需要账号 2FA。建议在 npm 网页生成 granular access token 并勾选 *Bypass 2FA on publish*，存为环境变量 `NPM_BYPASS_TOKEN`，再写入本地 `~/.npmrc` 的 `_authToken` 供 `npm publish` 使用（免验证码）。**`~/.npmrc` 内含可绕过 2FA 的明文 token，切勿提交到任何仓库或分享给他人**；若将 home 配置纳入 git 管理（dotfiles 仓库），务必先把 `~/.npmrc` 加入 `.gitignore`。
 10. **package.json 的 UTF-8 BOM（1.0.2 已修复）**：1.0.0/1.0.1 发布到 npm 的 `package.json` 首行带 UTF-8 BOM。pi 的 `readPiManifest` 用裸 `JSON.parse` 解析该文件，BOM 会令解析抛错并被静默忽略，导致整个扩展不加载（`/model` 里看不到 `opencode-fix`/`sensenova` 等任何 provider）。1.0.2 起已去掉 BOM；若 `pi install` 后看不到 provider，请 `pi update --extensions` 确认装的是 1.0.2+。pi 侧的健壮性问题已提交：[earendil-works/pi#8310](https://github.com/earendil-works/pi/issues/8310)。
 11. **无需手动配置 auth.json（1.0.4 起）**：旧版要求 `~/.pi/agent/auth.json` 中为每个 provider 添加 `{ "type": "api_key", "key": "public" }` 条目，否则 pi 找不到 key 会直接跳过扩展（报 `No API key found for <provider>`）。1.0.4 起每个 provider 自注册 `apiKey: "public"`（匿名占位），pi 视其为已配置 key，装完即可见可用；要使用账号 key 直接用环境变量即可。重装插件后无需再改 auth.json。
