@@ -574,6 +574,63 @@ opencode 原生方式不经过 `cleanBody`，但实测标准对话/工具调用�
 10. **package.json 的 UTF-8 BOM（1.0.2 已修复）**：1.0.0/1.0.1 发布到 npm 的 `package.json` 首行带 UTF-8 BOM。pi 的 `readPiManifest` 用裸 `JSON.parse` 解析该文件，BOM 会令解析抛错并被静默忽略，导致整个扩展不加载（`/model` 里看不到 `opencode-fix`/`sensenova` 等任何 provider）。1.0.2 起已去掉 BOM；若 `pi install` 后看不到 provider，请 `pi update --extensions` 确认装的是 1.0.2+。pi 侧的健壮性问题已提交：[earendil-works/pi#8310](https://github.com/earendil-works/pi/issues/8310)。
 11. **无需手动配置 auth.json（1.0.4 起）**：旧版要求 `~/.pi/agent/auth.json` 中为每个 provider 添加 `{ "type": "api_key", "key": "public" }` 条目，否则 pi 找不到 key 会直接跳过扩展（报 `No API key found for <provider>`）。1.0.4 起每个 provider 自注册 `apiKey: "public"`（匿名占位），pi 视其为已配置 key，装完即可见可用；要使用账号 key 直接用环境变量即可。重装插件后无需再改 auth.json。
 
+## ModLens 视觉引擎切换
+
+若安装了 [ModLens](https://github.com/liustack/modlens) 技能（`~/.agents/skills/modlens`），可通过以下命令在已配置的视觉引擎间切换：
+
+```bash
+# 查看当前状态
+bash ~/.agents/skills/modlens/scripts/run.sh doctor
+
+# 切换视觉引擎（推荐用 config use openai <槽位>，再设 provider openai）
+# key 从环境变量读取（.zshrc 已配置，无需手动输入）
+
+# --- 国内直连（无需代理） ---
+
+# Agnes CN（免费，512K 上下文，默认首选）
+bash ~/.agents/skills/modlens/scripts/run.sh config use openai cn
+bash ~/.agents/skills/modlens/scripts/run.sh config set provider openai
+
+# 智谱 GLM-4V Plus（需 key，环境变量 BIGMODEL_API_KEY）
+bash ~/.agents/skills/modlens/scripts/run.sh config use openai zhipu
+bash ~/.agents/skills/modlens/scripts/run.sh config set provider openai
+
+# 商汤 SenseNova 6.8 Flash Lite（免费多模态，环境变量 SENSENOVA_API_KEY）
+bash ~/.agents/skills/modlens/scripts/run.sh config use openai sensenova
+bash ~/.agents/skills/modlens/scripts/run.sh config set provider openai
+
+# 阿里通义千问 Qwen-VL（需 key，环境变量 ALI_API_KEY，DashScope 平台）
+bash ~/.agents/skills/modlens/scripts/run.sh config use openai dashscope
+bash ~/.agents/skills/modlens/scripts/run.sh config set provider openai
+
+# 硅基流动 Qwen3-VL-30B-A3B（环境变量 SILICONFLOW_API_KEY）
+bash ~/.agents/skills/modlens/scripts/run.sh config use openai siliconflow
+bash ~/.agents/skills/modlens/scripts/run.sh config set provider openai
+
+# Agnes 国际版（国内直连可用，比 CN 慢约一倍）
+bash ~/.agents/skills/modlens/scripts/run.sh config use openai intl
+bash ~/.agents/skills/modlens/scripts/run.sh config set provider openai
+
+# --- 需代理 ---
+
+# Gemini（免费，~1500次/天，需要代理访问 Google API）
+bash ~/.agents/skills/modlens/scripts/run.sh config set provider gemini-api
+```
+
+各引擎对比：
+
+| 引擎 | 模型 | 速度 | 布局分析 | 网络 | 实测 | 当前状态 |
+|------|------|------|---------|------|------|---------|
+| Agnes CN | agnes-2.5-flash | ~17-20s | 48 区域（详细） | 直连国内 | ✅ | ✅ 首选 |
+| 智谱 | glm-4v-plus | ~21s | — | 直连国内 | ✅（需 `structuredOutput: true`） | 备选 |
+| 商汤 | sensenova-6.8-flash-lite | ~27s | 多模态 | 直连国内 | ✅ | 备选 |
+| 阿里通义千问 | qwen3-vl-flash | — | — | 直连国内 | ❌ VL 免费额度耗尽（图像生成额度有剩余） | 备选 |
+| 硅基流动 | Qwen3-VL-30B-A3B | ~39s | 开源视觉 MoE | 直连国内 | ✅ | 备选 |
+| Gemini | gemini-3.6-flash | ~16s | 4 区域（简洁） | 需代理 | ✅ | 备选 |
+| Agnes 国际版 | agnes-2.5-flash | ~35s | 48 区域（详细） | 国内直连（慢） | ✅ | 备选 |
+
+> 所有 openai 槽位的 key 均从环境变量读取（`AGNES_CN_API_KEY`、`AGNES_API_KEY`、`BIGMODEL_API_KEY`、`SENSENOVA_API_KEY`、`SILICONFLOW_API_KEY`、`ALI_API_KEY`），配置在 `~/.zshrc` 中。
+
 ## License
 
 MIT
