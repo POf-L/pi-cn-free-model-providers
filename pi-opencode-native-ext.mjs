@@ -510,11 +510,10 @@ const AGNES_MODELS = [
 // Models we vouch for: verified free tier + correct metadata (contextWindow,
 // maxTokens, reasoning, input, cost). At load each list is intersected with
 // the provider's live /v1/models so models that leave the free tier or get
-// renamed are auto-removed (drift detection). New free models are still added
-// here manually after confirming them on the provider's pricing page, because
-// the live /v1/models endpoints expose no pricing and paid models keep their
-// "-free" ids (e.g. deepseek-v4-flash-free) — auto-adding would risk exposing
-// paid models as free.
+// renamed are auto-removed (drift detection). For Zen, every live model is
+// additionally probe-verified as free at load (see verifyZenModels): unknown
+// free models are auto-added with conservative metadata, and curated entries
+// that switched to paid are dropped despite being whitelisted.
 const ZEN_FREE_MODELS = [
   {
     id: "mimo-v2.5-free",
@@ -569,6 +568,16 @@ const ZEN_FREE_MODELS = [
   {
     id: "big-pickle",
     name: "Big Pickle",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 200000,
+    maxTokens: 128000,
+  },
+  {
+    id: "x-preview-f-free",
+    name: "Ox Alpha Free",
     api: "openai-completions",
     reasoning: true,
     input: ["text"],
@@ -779,8 +788,6 @@ function authHeader(envKey) {
   return { Authorization: `Bearer ${process.env[envKey] ?? "public"}` };
 }
 // Intersect curated with live ids; drop models no longer present upstream.
-// Never auto-adds: live /v1/models exposes no pricing, and paid models keep
-// "-free" ids, so adding unknowns would risk surfacing paid models as free.
 async function filterToLive(curated, url, headers) {
   const live = await fetchLiveModelIds(url, headers);
   if (!live) return curated;
@@ -788,23 +795,111 @@ async function filterToLive(curated, url, headers) {
   return kept.length ? kept : curated;
 }
 
+// ── Zen free-model auto-discovery ──
+// /v1/models exposes no pricing and paid models keep "-free" ids, so freeness
+// is verified by probing: a tiny chat completion per unknown model. Free
+// models accept the anonymous "public" key (HTTP 200) while paid ones reject
+// it during auth (401/402/403) before any tokens are billed. When a real
+// OPENCODE_API_KEY is set, the response's `cost` field must be zero instead —
+// paid models then succeed but report non-zero cost.
+// Returns "free" (verified), "paid" (verified not free), or "unknown"
+// (network/shape errors — callers must keep the model rather than drop it,
+// so a transient outage never wipes the list).
+async function probeFreeStatus(modelId) {
+  const apiKey = process.env.OPENCODE_API_KEY;
+  let res;
+  try {
+    res = await fetch("https://opencode.ai/zen/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...OPENCODE_STATIC_HEADERS,
+        "x-opencode-session": SESSION_ID,
+        "x-opencode-request": generateOpenCodeId("msg_"),
+        Authorization: `Bearer ${apiKey ?? "public"}`,
+      },
+      body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
+      signal: AbortSignal.timeout(20000),
+    });
+  } catch {
+    return "unknown";
+  }
+  if (!res.ok) {
+    // Auth/billing rejection = verified not free. Anything else (5xx, rate
+    // limit) says nothing about pricing — treat as unknown.
+    return [401, 402, 403].includes(res.status) ? "paid" : "unknown";
+  }
+  let json;
+  try { json = await res.json(); } catch { return "unknown"; }
+  if (apiKey) return Number(json?.cost ?? 0) === 0 ? "free" : "paid";
+  return "free";
+}
+// Run async fn over items with bounded concurrency.
+async function mapLimit(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const idx = next++;
+      results[idx] = await fn(items[idx]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+function makeDiscoveredModel(id) {
+  return {
+    id,
+    name: id,
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 65536,
+  };
+}
+// Verify the whole live Zen list by probing every id (curated entries use
+// their hand-verified metadata, unknown ones get conservative defaults). This
+// catches models that switched from free to paid while staying listed — they
+// are dropped exactly like renamed/removed ones. If nothing verifies free
+// (e.g. probes all failed), fall back to the curated ∩ live intersection so a
+// gateway outage never empties the provider.
+async function verifyZenModels(liveIds) {
+  const known = new Map(ZEN_FREE_MODELS.map((m) => [m.id, m]));
+  const ids = [...liveIds];
+  const statuses = await mapLimit(ids, 8, probeFreeStatus);
+  const verified = [];
+  for (let i = 0; i < ids.length; i++) {
+    if (statuses[i] !== "free") continue;
+    verified.push(known.get(ids[i]) ?? makeDiscoveredModel(ids[i]));
+  }
+  if (verified.length) return verified;
+  const kept = ZEN_FREE_MODELS.filter((m) => liveIds.has(m.id));
+  return kept.length ? kept : ZEN_FREE_MODELS;
+}
+
 // ── Extension entry ──
 export default async function (pi) {
   // Drift detection: intersect each curated allowlist with the provider's
   // live /v1/models. Models that left the free tier / were renamed are dropped
   // automatically. Fetch failures fall back to the curated list so registration
-  // never breaks. We never auto-add (see filterToLive comment above).
-  const [zenModels, sensenovaModels, siliconflowModels, modelscopeModels, nvidiaModels, agnesModels] = await Promise.all([
-    filterToLive(ZEN_FREE_MODELS, "https://opencode.ai/zen/v1/models", {
-      ...OPENCODE_STATIC_HEADERS,
-      Authorization: `Bearer ${process.env.OPENCODE_API_KEY ?? "public"}`,
-    }),
+  // never breaks. For Zen, every live model is additionally probe-verified as
+  // still free (see verifyZenModels above) — this also drops models that
+  // switched to paid while remaining listed.
+  const zenHeaders = {
+    ...OPENCODE_STATIC_HEADERS,
+    Authorization: `Bearer ${process.env.OPENCODE_API_KEY ?? "public"}`,
+  };
+  const [zenLive, sensenovaModels, siliconflowModels, modelscopeModels, nvidiaModels, agnesModels] = await Promise.all([
+    fetchLiveModelIds("https://opencode.ai/zen/v1/models", zenHeaders),
     filterToLive(SENSENOVA_MODELS, "https://token.sensenova.cn/v1/models", authHeader("SENSENOVA_API_KEY")),
     filterToLive(SILICONFLOW_MODELS, "https://api.siliconflow.cn/v1/models", authHeader("SILICONFLOW_API_KEY")),
     filterToLive(MODELSCOPE_MODELS, "https://api-inference.modelscope.cn/v1/models", authHeader("MODELSCOPE_API_KEY")),
     filterToLive(NVIDIA_MODELS, "https://integrate.api.nvidia.com/v1/models", authHeader("NVIDIA_NIM_API_KEY")),
     filterToLive(AGNES_MODELS, "https://apihub.agnes-ai.com/v1/models", authHeader("AGNES_API_KEY")),
   ]);
+  const zenModels = zenLive ? await verifyZenModels(zenLive) : ZEN_FREE_MODELS;
   // Cloudflare has no anonymous /v1/models (account-scoped search endpoint);
   // paid models are excluded via the opencode blacklist instead. Keep curated.
   const cloudflareModels = CLOUDFLARE_MODELS;

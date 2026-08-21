@@ -98,6 +98,7 @@ pi --model opencode-fix/hy3-free
 | `mimo-v2.5-free` | 多模态 |
 | `nemotron-3-ultra-free` | 超长上下文（1M） |
 | `nemotron-3.5-lightning-free` | 高速执行 |
+| `x-preview-f-free` | Ox Alpha，匿名 stealth 模型（零保留隐私政策） |
 
 TUI 内 **Ctrl+P** 循环切换模型。
 
@@ -574,6 +575,8 @@ opencode 原生方式不经过 `cleanBody`，但实测标准对话/工具调用�
 11. **无需手动配置 auth.json（1.0.4 起）**：旧版要求 `~/.pi/agent/auth.json` 中为每个 provider 添加 `{ "type": "api_key", "key": "public" }` 条目，否则 pi 找不到 key 会直接跳过扩展（报 `No API key found for <provider>`）。1.0.4 起每个 provider 自注册 `apiKey: "public"`（匿名占位），pi 视其为已配置 key，装完即可见可用；要使用账号 key 直接用环境变量即可。重装插件后无需再改 auth.json。
 
 12. **免费清单自动去漂移（1.0.6 起）**：每个 provider 在加载时会拉取各自的 `/v1/models` 实时列表，与内置白名单做交集，**自动剔除已从免费档下架/改名的模型**（如某模型被移出免费档，下次启动即不再出现，无需等发版）。设计上**只删不增**：因为各 `/v1/models` 端点不返回定价，且付费模型会保留 `-free` 后缀（如已被移出免费档的 `deepseek-v4-flash-free` 仍列在 Zen 端点里），自动新增会把付费模型误当免费暴露。新增免费模型仍需在 `pi-opencode-native-ext.mjs` 的对应白名单里人工添加（并补好 metadata）。拉取失败/超时（8s）时静默回退到内置白名单，注册永不中断；第三方供应商需设置对应 API key 环境变量才会做实时校验，否则直接用内置列表。
+
+13. **Zen 免费模型自动发现 + 免费状态复核（1.0.7 起）**：Zen 供应商在加载时会对实时列表中的**全部模型逐个发探测请求**（`max_tokens: 1` 的小请求，8 路并发）：匿名 `public` key 能返回 200 即判定免费（付费模型在鉴权阶段就被 401 拒绝，不计费）；若设置了真实 `OPENCODE_API_KEY`，则改用响应中的 `cost` 字段是否为 0 判定。因此：① 不在白名单的新免费模型**无需等插件发版即可直接使用**（自动注册，保守 metadata：上下文 128K / 输出 64K，名称即模型 ID）；② **白名单模型若被官方转为付费，即使仍在 `/v1/models` 里也会被自动剔除**，避免匿名下报错、配了真实 key 时被误扣费。探测结果分三档：`free`（保留/新增）、`paid`（剔除）、`unknown`（网络故障等，一律保留原状，瞬时故障不会清空列表；全部 unknown 时回退到白名单 ∩ 实时列表）。白名单条目始终优先（元数据更精确），想要补全显示名/上下文窗口可在白名单中加正式条目。
 
 ## ModLens 视觉引擎切换
 
