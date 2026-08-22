@@ -1,4 +1,5 @@
-sensenova-6.7-flash-lite
-sensenova-6.8-flash-lite
 deepseek-v4-flash
 glm-5.2
+sensenova-6.7-flash-lite
+sensenova-6.8-flash-lite
+sensenova-u1-fast
