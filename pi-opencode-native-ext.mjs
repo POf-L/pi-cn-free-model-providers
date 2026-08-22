@@ -431,7 +431,20 @@ const streamCloudflare = (model, context, options) => {
 async function run(stream, output, model, context, options, cfg) {
   const state = { output, stream, contentBlockIndex: -1, thinkingBlockIndex: -1, toolCallsState: [] };
   try {
-    const messages = normalizeMessages(context.messages ?? []);
+    // pi carries its system prompt (coding prompt, injected skills XML, etc.)
+    // in context.systemPrompt — forward it, otherwise the model never sees it.
+    const sysRaw = context.systemPrompt;
+    let systemText = "";
+    if (typeof sysRaw === "string") systemText = sysRaw;
+    else if (Array.isArray(sysRaw)) systemText = sysRaw.map((b) => (typeof b === "string" ? b : b?.text ?? "")).join("");
+    else if (sysRaw && typeof sysRaw === "object") {
+      const c = sysRaw.content ?? sysRaw.text;
+      if (typeof c === "string") systemText = c;
+    }
+    const messages = [
+      ...(systemText ? [{ role: "system", content: systemText }] : []),
+      ...normalizeMessages(context.messages ?? []),
+    ];
     const tools = normalizeTools(context.tools);
     let body = {
       model: model.id,
