@@ -10,6 +10,8 @@ name: nvidia-model-watch
 # 429 重试一次，其余失败直接记录，最终汇总自动开 issue。每周约 6 次请求，
 # 相对 10k/天额度可忽略。需在仓库 Settings → Secrets 配置 NVIDIA_NIM_API_KEY；
 # 未配置时退化为纯目录比对模式。
+# 另含新模型发现：重点厂商新增条目 vs watch-state/nvidia-known-ids.txt 基线，
+# 新版本/替代模型上线即提示评估收录；基线变更由 workflow 自动提交。
 
 on:
   schedule:
@@ -18,6 +20,7 @@ on:
 
 permissions:
   issues: write
+  contents: write
 
 jobs:
   watch:
@@ -45,6 +48,25 @@ jobs:
           done < /tmp/curated.txt
           echo "从官方目录消失 $(grep -c . /tmp/gone.txt || true) 个:"
           cat /tmp/gone.txt
+
+      - name: Discover newly listed models (major vendors)
+        run: |
+          curl -s -m 60 "https://integrate.api.nvidia.com/v1/models"             | grep -o '"id":"[^"]*"' | cut -d'"' -f4 | sort -u > /tmp/all_live.txt
+          grep -E '^(openai|moonshotai|deepseek-ai|minimaxai|stepfun-ai|qwen)/' /tmp/all_live.txt > /tmp/live_known.txt || :
+          : > /tmp/discovered.txt
+          comm -13 .github/watch-state/nvidia-known-ids.txt /tmp/live_known.txt > /tmp/new_ids.txt || :
+          n=$(grep -c . /tmp/new_ids.txt || true)
+          echo "重点厂商目录新增 ${n:-0} 个:"
+          cat /tmp/new_ids.txt
+          if [ "${n:-0}" != "0" ]; then
+            while IFS= read -r mid; do
+              [ -z "$mid" ] && continue
+              printf '_catalog\tNVIDIA 目录新增（可能是升级版/替代型号，请评估收录）: %s\n' "$mid" >> /tmp/discovered.txt
+            done < /tmp/new_ids.txt
+            sort -u .github/watch-state/nvidia-known-ids.txt /tmp/live_known.txt > /tmp/merged.txt
+            mv /tmp/merged.txt .github/watch-state/nvidia-known-ids.txt
+            echo "changed=1" > /tmp/state_changed.env
+          fi
 
       - name: Probe each curated model with a tiny streaming request
         env:
@@ -100,9 +122,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          : > /tmp/discovered.txt
           gone=$(grep -c . /tmp/gone.txt 2>/dev/null || true)
           bad=$(grep -c . /tmp/unhealthy.txt 2>/dev/null || true)
-          if [ "${gone:-0}" = "0" ] && [ "${bad:-0}" = "0" ]; then
+          disc=$(grep -c . /tmp/discovered.txt 2>/dev/null || true)
+          if [ "${gone:-0}" = "0" ] && [ "${bad:-0}" = "0" ] && [ "${disc:-0}" = "0" ]; then
             echo "全部正常，无需开 issue"
             exit 0
           fi
@@ -118,8 +142,28 @@ jobs:
               done < /tmp/unhealthy.txt
               printf '\n'
             fi
+            if [ "${disc:-0}" != "0" ]; then
+              printf '## 目录新增（未收录，请评估）\n\n| 模型 |\n|---|\n'
+              while IFS="$(printf '\t')" read -r mid; do
+                printf '| `%s` |\n' "$mid"
+              done < /tmp/discovered.txt
+              printf '\n'
+            fi
             printf '参考：\n- 目录查询: `GET https://integrate.api.nvidia.com/v1/models`（匿名可访问）\n- 免费限额: 40 RPM + 10,000 次/天（每日重置）\n- 更新位置: `NVIDIA_MODELS`（pi-opencode-native-ext.mjs）、README NVIDIA 小节、模型对比表、场景矩阵\n'
           } > /tmp/body.md
           gh issue create \
             --title "⚠️ NVIDIA 在册模型巡检异常 ($(date +%F))" \
             --body-file /tmp/body.md
+
+      - name: Commit refreshed baselines
+        if: always()
+        run: |
+          if [ ! -f /tmp/state_changed.env ]; then
+            echo "基线无变化"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/watch-state/
+          git commit -m "chore(watch): refresh nvidia baseline (auto)" || exit 0
+          git push || echo "推送失败（分支保护？），基线已保留在运行日志中"
