@@ -1,0 +1,179 @@
+name: sensenova-model-watch
+
+# SenseNova（商汤日日新）失效模式与检测通道：
+#   1) 文档站 platform.sensenova.cn/docs 是 Next.js SPA 壳（无 llms.txt/sitemap/
+#      匿名 Markdown，JS chunk 内亦无数据接口），无法像 Agnes/Cloudflare 那样
+#      匿名抓取文档；
+#   2) /v1/models 匿名返回 401（伪造 token 返回 Forbidden，校验真实有效），无 key
+#      用户运行时 filterToLive 失效；但带 key 的 /v1/models 是权威目录且每个模型
+#      条目含计费元数据（README 实测：免费模型 pricing=0，businesses 含
+#      tokenplan/metered）——一次调用同时覆盖下线/转付费/新增三类核心失效；
+#   3) 免费公测按次限额（flash-lite 1,500 次/5h、deepseek-v4-flash 150 次/5h），
+#      无 Cloudflare 式额度换算问题，pricing 非 0 即明确的转付费信号。
+# 检测逻辑（需仓库 secret SENSENOVA_API_KEY；未配置时跳过并告警，不影响其他步骤）：
+#   a) 在册模型从响应消失 = 下线/改名；
+#   b) 在册模型条目 pricing 非 0 = 免费撤销；字段缺失仅作结构提示不误判，
+#      并附原始条目供人工核验；
+#   c) 响应新 id vs watch-state/sensenova-known-ids.txt 基线 = 新模型上线，
+#      附完整条目（含计费信息）供评估收录；基线由 workflow 自动提交。
+#      基线初版仅含在册 4 模型，首次运行会把目录中其余模型作为“新发现”报出
+#      一次（顺带摸清全量阵容），自动提交后即稳定。
+# 不做流式探活：网关对参数表外字段一律拒收（报错无信息量，见扩展 cleanBody
+# 注释），目录+计费元数据已覆盖核心失效模式，避免探活引入误报。
+
+on:
+  schedule:
+    - cron: "59 4 * * 1" # 每周一 04:59 UTC（错开 agnes 04:35）
+  workflow_dispatch: {}
+
+permissions:
+  issues: write
+  contents: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract curated sensenova model ids
+        run: |
+          awk '/^const SENSENOVA_MODELS/,/^];/' pi-opencode-native-ext.mjs \
+            | grep -o 'id: "[^"]*"' | cut -d'"' -f2 > /tmp/curated.txt
+          echo "在册模型 $(wc -l < /tmp/curated.txt) 个:"
+          cat /tmp/curated.txt
+
+      - name: Fetch authoritative catalog
+        env:
+          SENSENOVA_API_KEY: ${{ secrets.SENSENOVA_API_KEY }}
+        run: |
+          rm -f /tmp/key_ok
+          if [ -z "$SENSENOVA_API_KEY" ]; then
+            echo "::warning::未配置 SENSENOVA_API_KEY secret，本次巡检跳过"
+            exit 0
+          fi
+          http=$(curl -o /tmp/models.json -sS --max-time 60 -w '%{http_code}' \
+            -H "Authorization: Bearer $SENSENOVA_API_KEY" \
+            "https://token.sensenova.cn/v1/models")
+          echo "HTTP $http，$(wc -c < /tmp/models.json) bytes"
+          if [ "$http" != "200" ]; then
+            echo "::error::目录拉取失败 HTTP $http"
+            cat /tmp/models.json
+            exit 1
+          fi
+          touch /tmp/key_ok
+
+      - name: Curated presence + free-pricing check
+        run: |
+          : > /tmp/anomalies.txt
+          [ -f /tmp/key_ok ] || { echo "无密钥，跳过检测"; exit 0; }
+          jq -r '.data[]?.id // empty' /tmp/models.json | sort -u > /tmp/live.txt
+          if [ ! -s /tmp/live.txt ]; then
+            # jq 解析失败：退化为正则提取；仍失败则视为 schema 变更
+            grep -oE '"id"[[:space:]]*:[[:space:]]*"[^"]+"' /tmp/models.json \
+              | sed 's/.*: *"//;s/"$//' | sort -u > /tmp/live.txt || :
+          fi
+          if [ ! -s /tmp/live.txt ]; then
+            printf '_schema\t/v1/models 响应结构变更（jq 与正则均未解析出 id），请人工核验\n' >> /tmp/anomalies.txt
+            exit 0
+          fi
+          echo "权威目录 $(wc -l < /tmp/live.txt) 个模型"
+          while IFS= read -r id; do
+            [ -z "$id" ] && continue
+            if ! grep -qxF -- "$id" /tmp/live.txt; then
+              printf '%s\t从权威目录消失（疑似下线或改名）\n' "$id" >> /tmp/anomalies.txt
+              continue
+            fi
+            raw=$(jq -c --arg id "$id" '.data[] | select(.id==$id)' /tmp/models.json | head -1)
+            if [ -z "$raw" ]; then
+              printf '%s\t条目缺失（目录含 id 但无对应对象，请人工核验）\n' "$id" >> /tmp/anomalies.txt
+              continue
+            fi
+            pv=$(echo "$raw" | jq -r '(.pricing // .price // "?") |
+              if type == "number" then tostring
+              elif type == "string" or type == "boolean" then tostring
+              else "STRUCT:" + tostring end' 2>/dev/null || echo "?")
+            case "$pv" in
+              "0"|'false'|""|"null")
+                echo "$id -> OK（pricing=$pv 免费）"
+                ;;
+              "?")
+                printf '%s\t条目无 pricing/price 字段（schema 变更？请核验）原始条目: %s\n' "$id" "$(echo "$raw" | head -c 300)" >> /tmp/anomalies.txt
+                ;;
+              STRUCT*)
+                printf '%s\tpricing 为复合结构（schema 变更？请核验）原始值: %s\n' "$id" "${pv#STRUCT:}" >> /tmp/anomalies.txt
+                ;;
+              *)
+                printf '%s\t免费档撤销：pricing=%s\n' "$id" "$pv" >> /tmp/anomalies.txt
+                ;;
+            esac
+          done < /tmp/curated.txt
+
+      - name: Discover newly listed models
+        run: |
+          [ -f /tmp/key_ok ] || { echo "无密钥，跳过发现"; exit 0; }
+          [ -s /tmp/live.txt ] || exit 0
+          comm -13 .github/watch-state/sensenova-known-ids.txt /tmp/live.txt > /tmp/new_ids.txt || :
+          n=$(grep -c . /tmp/new_ids.txt || true)
+          echo "新上架 ${n:-0} 个:"
+          cat /tmp/new_ids.txt
+          if [ "${n:-0}" != "0" ]; then
+            sort -u .github/watch-state/sensenova-known-ids.txt /tmp/live.txt > /tmp/merged.txt
+            mv /tmp/merged.txt .github/watch-state/sensenova-known-ids.txt
+            echo "changed=1" > /tmp/state_changed.env
+          fi
+
+      - name: Open issue when anomalies found
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(grep -c . /tmp/anomalies.txt 2>/dev/null || true)
+          newn=$(grep -c . /tmp/new_ids.txt 2>/dev/null || true)
+          if [ "${n:-0}" = "0" ] && [ "${newn:-0}" = "0" ]; then
+            echo "全部正常，无需开 issue"
+            exit 0
+          fi
+          {
+            echo "周期巡检发现 SenseNova 目录异常（$(date +%F)）。"
+            echo ""
+            if [ "${n:-0}" != "0" ]; then
+              echo "## 在册模型异常"
+              echo ""
+              while IFS= read -r ln; do
+                id="${ln%%$'\t'*}"
+                msg="${ln#*$'\t'}"
+                echo "* \`$id\` —— $msg"
+              done < /tmp/anomalies.txt
+              echo ""
+            fi
+            if [ "${newn:-0}" != "0" ]; then
+              echo "## 新上架模型（附计费元数据，请评估收录）"
+              echo ""
+              while IFS= read -r mid; do
+                entry=$(jq -c --arg id "$mid" '.data[] | select(.id==$id)' /tmp/models.json | head -1 | head -c 400)
+                echo "* \`$mid\`"
+                echo "  - \`$entry\`"
+              done < /tmp/new_ids.txt
+              echo ""
+            fi
+            echo "参考："
+            echo "- 权威目录: GET https://token.sensenova.cn/v1/models（需鉴权，响应含 pricing 等计费元数据）"
+            echo "- 平台文档: https://platform.sensenova.cn/docs（SPA，匿名不可抓取，故本巡检走 API）"
+            echo "- 更新位置: SENSENOVA_MODELS（pi-opencode-native-ext.mjs）、README SenseNova 小节、模型对比表、场景矩阵"
+          } > /tmp/body.md
+          gh issue create \
+            --title "⚠️ SenseNova 目录巡检异常 ($(date +%F))" \
+            --body-file /tmp/body.md
+
+      - name: Commit refreshed baselines
+        if: always()
+        run: |
+          if [ ! -f /tmp/state_changed.env ]; then
+            echo "基线无变化"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/watch-state/
+          git commit -m "chore(watch): refresh sensenova baseline (auto)" || exit 0
+          git push || echo "推送失败（分支保护？），基线已保留在运行日志中"

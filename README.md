@@ -130,6 +130,8 @@ export SENSENOVA_API_KEY=sk-xxx
 
 > `sensenova-u1-fast` 为**图像生成专用**（`output_modalities: image`，走 `/v1/images/generations`），与 chat completions 不兼容，未注册。
 
+> 🔭 **变动监听**：`.github/workflows/sensenova-watch.yml` 每周巡检（04:59 UTC）。平台文档站是 SPA 壳无法匿名抓取，故走带密钥的权威目录 `GET /v1/models`（响应含 pricing 等计费元数据）：在册模型消失＝下线/改名；pricing 非 0＝免费档撤销；新 id 出现＝新模型上线并附计费元数据供评估收录。需配置 secret `SENSENOVA_API_KEY`；基线存 `.github/watch-state/` 由 workflow 自动提交。
+
 #### 使用
 
 ```bash
