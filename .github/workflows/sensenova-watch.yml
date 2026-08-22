@@ -6,8 +6,9 @@ name: sensenova-model-watch
 #      匿名抓取文档；
 #   2) /v1/models 匿名返回 401（伪造 token 返回 Forbidden，校验真实有效），无 key
 #      用户运行时 filterToLive 失效；但带 key 的 /v1/models 是权威目录且每个模型
-#      条目含计费元数据（README 实测：免费模型 pricing=0，businesses 含
-#      tokenplan/metered）——一次调用同时覆盖下线/转付费/新增三类核心失效；
+#      条目含计费元数据（实测 schema：pricing 为对象，子字段 prompt/completion/
+#      image/request/input_cache_read 均为 "0" 即免费，businesses 含 tokenplan/metered）
+#      ——一次调用同时覆盖下线/转付费/新增三类核心失效；
 #   3) 免费公测按次限额（flash-lite 1,500 次/5h、deepseek-v4-flash 150 次/5h），
 #      无 Cloudflare 式额度换算问题，pricing 非 0 即明确的转付费信号。
 # 检测逻辑（需仓库 secret SENSENOVA_API_KEY；未配置时跳过并告警，不影响其他步骤）：
@@ -16,7 +17,7 @@ name: sensenova-model-watch
 #      并附原始条目供人工核验；
 #   c) 响应新 id vs watch-state/sensenova-known-ids.txt 基线 = 新模型上线，
 #      附完整条目（含计费信息）供评估收录；基线由 workflow 自动提交。
-#      基线初版仅含在册 4 模型，首次运行会把目录中其余模型作为“新发现”报出
+#      基线已用真实全量阵容播种（5 个，2026-08 实测）；后续新 id 才会触发发现。
 #      一次（顺带摸清全量阵容），自动提交后即稳定。
 # 不做流式探活：网关对参数表外字段一律拒收（报错无信息量，见扩展 cleanBody
 # 注释），目录+计费元数据已覆盖核心失效模式，避免探活引入误报。
@@ -89,22 +90,27 @@ jobs:
               printf '%s\t条目缺失（目录含 id 但无对应对象，请人工核验）\n' "$id" >> /tmp/anomalies.txt
               continue
             fi
-            pv=$(echo "$raw" | jq -r '(.pricing // .price // "?") |
-              if type == "number" then tostring
-              elif type == "string" or type == "boolean" then tostring
-              else "STRUCT:" + tostring end' 2>/dev/null || echo "?")
+            pv=$(echo "$raw" | jq -r '
+              if (.pricing // null | type) == "object" then
+                ([.pricing | to_entries[]
+                  | select(((.value | tonumber?) // 1) != 0)
+                  | "\(.key)=\(.value)"] | join(",")) as $bad
+                | if $bad == "" then "FREE-OBJ" else "PAID:" + $bad end
+              elif .pricing != null then (.pricing | tostring)
+              elif .price != null then (.price | tostring)
+              else "?" end' 2>/dev/null || echo "?")
             case "$pv" in
-              "0"|'false'|""|"null")
-                echo "$id -> OK（pricing=$pv 免费）"
+              FREE-OBJ|"0"|'false'|""|"null")
+                echo "$id -> OK（免费，pricing 全零）"
                 ;;
               "?")
                 printf '%s\t条目无 pricing/price 字段（schema 变更？请核验）原始条目: %s\n' "$id" "$(echo "$raw" | head -c 300)" >> /tmp/anomalies.txt
                 ;;
-              STRUCT*)
-                printf '%s\tpricing 为复合结构（schema 变更？请核验）原始值: %s\n' "$id" "${pv#STRUCT:}" >> /tmp/anomalies.txt
+              PAID:*)
+                printf '%s\t免费档撤销：非零计费字段 %s\n' "$id" "${pv#PAID:}" >> /tmp/anomalies.txt
                 ;;
               *)
-                printf '%s\t免费档撤销：pricing=%s\n' "$id" "$pv" >> /tmp/anomalies.txt
+                printf '%s\t计费字段结构变化（请核验）：%s\n' "$id" "$pv" >> /tmp/anomalies.txt
                 ;;
             esac
           done < /tmp/curated.txt
