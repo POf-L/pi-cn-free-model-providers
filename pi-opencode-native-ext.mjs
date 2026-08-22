@@ -747,7 +747,9 @@ const MODELSCOPE_MODELS = [
 // across ALL models, so this provider suits low-frequency / fallback use.
 // Curated from the ~100-model catalog after live streaming benchmarks (2026-08).
 // Excluded: deepseek-v4-flash-0731 (read timeout x2), stepfun step-3.7-flash
-// (HTTP 500), kimi-k2.6 / codestral-22b (HTTP 404 not entitled on free accounts).
+// (HTTP 500), kimi-k2.6 / codestral-22b (HTTP 404 not entitled on free accounts),
+// gpt-oss-120b (persistent read-timeouts confirmed by local benchmark + the
+// nvidia-watch CI probe across two networks; Cloudflare carries the same model).
 const NVIDIA_MODELS = [
   // Benchmark winner: TTFB 0.8s, ~130 tok/s.
   {
@@ -797,18 +799,6 @@ const NVIDIA_MODELS = [
   {
     id: "nvidia/llama-3.3-nemotron-super-49b-v1.5",
     name: "Llama 3.3 Nemotron Super 49B v1.5 (via NVIDIA NIM)",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 65536,
-  },
-  // Kept despite 4x read-timeout during the 2026-08 benchmark — likely transient
-  // overload (Cloudflare carries the same model as a fallback); drop if still dead.
-  {
-    id: "openai/gpt-oss-120b",
-    name: "GPT-OSS 120B (via NVIDIA NIM)",
     api: "openai-completions",
     reasoning: true,
     input: ["text"],
