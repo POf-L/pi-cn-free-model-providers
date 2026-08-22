@@ -742,7 +742,70 @@ const MODELSCOPE_MODELS = [
     maxTokens: 65536,
   },
 ];
+// NVIDIA NIM (build.nvidia.com) — free tier: up to 40 RPM + 10,000 requests/day
+// (site-published limits, daily reset). The RPM cap is account-level and shared
+// across ALL models, so this provider suits low-frequency / fallback use.
+// Curated from the ~100-model catalog after live streaming benchmarks (2026-08).
+// Excluded: deepseek-v4-flash-0731 (read timeout x2), stepfun step-3.7-flash
+// (HTTP 500), kimi-k2.6 / codestral-22b (HTTP 404 not entitled on free accounts).
 const NVIDIA_MODELS = [
+  // Benchmark winner: TTFB 0.8s, ~130 tok/s.
+  {
+    id: "openai/gpt-oss-20b",
+    name: "GPT-OSS 20B (via NVIDIA NIM)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 65536,
+  },
+  // TTFB 0.8s, ~70 tok/s.
+  {
+    id: "minimaxai/minimax-m3",
+    name: "MiniMax M3 (via NVIDIA NIM)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 65536,
+  },
+  // Thinking model; TTFB 0.8s, ~80 tok/s.
+  {
+    id: "nvidia/nemotron-3-nano-30b-a3b",
+    name: "Nemotron 3 Nano 30B A3B (via NVIDIA NIM)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 65536,
+  },
+  // Works but slow generation (~5-18 tok/s).
+  {
+    id: "moonshotai/kimi-k3",
+    name: "Kimi K3 (via NVIDIA NIM)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 65536,
+  },
+  // Thinking model; reasoning consumes most of max_tokens -> slow effective speed.
+  {
+    id: "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+    name: "Llama 3.3 Nemotron Super 49B v1.5 (via NVIDIA NIM)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 65536,
+  },
+  // Kept despite 4x read-timeout during the 2026-08 benchmark — likely transient
+  // overload (Cloudflare carries the same model as a fallback); drop if still dead.
   {
     id: "openai/gpt-oss-120b",
     name: "GPT-OSS 120B (via NVIDIA NIM)",

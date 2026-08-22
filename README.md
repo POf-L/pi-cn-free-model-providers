@@ -184,21 +184,26 @@ pi -p --provider modelscope --model modelscope/Qwen/Qwen3-Coder-30B-A3B-Instruct
 
 ### NVIDIA NIM
 
-NVIDIA 官方推理平台，无需信用卡，40 RPM，无每日总量上限。
+NVIDIA 官方推理平台（build.nvidia.com），无需信用卡。限额：**40 RPM + 10,000 次/天**（官网公布数据，每日重置）。注意 RPM 是**账号级**限制、全部模型共享，适合低频调用/兑底渠道。完整目录约 102 个模型（`GET /v1/models` 可匿名查询），本扩展收录 2026-08 流式实测通过的 6 个：
 
 ```bash
 # 在 https://build.nvidia.com 注册获取 key
 export NVIDIA_NIM_API_KEY=nvapi-xxx
 
 # 使用
-pi -p --provider nvidia --model nvidia/openai/gpt-oss-120b "你好"
+pi -p --provider nvidia --model nvidia/openai/gpt-oss-20b "你好"
 ```
 
-| 模型 ID | 说明 | 上下文 | 限额 |
+| 模型 ID | 说明 | 上下文 | 实测（2026-08 流式探测） |
 |---|---|---|---|
-| `openai/gpt-oss-120b` | OpenAI 开源权重模型 | 128K | 无每日上限 |
+| `openai/gpt-oss-20b` | ⭐ 实测最快：TTFB 0.8s / ~130 tok/s；数学/工具调用继承 GPT-OSS 家族，中文偏弱 | 128K | ✅ |
+| `minimaxai/minimax-m3` | MiniMax 推理模型：TTFB 0.8s / ~70 tok/s | 128K | ✅ |
+| `nvidia/nemotron-3-nano-30b-a3b` | Nemotron 3 Nano MoE（思考型）：TTFB 0.8s / ~80 tok/s | 128K | ✅ |
+| `moonshotai/kimi-k3` | Moonshot 旗舰：生成偏慢（~5-18 tok/s） | 128K | ⚠️ 慢 |
+| `nvidia/llama-3.3-nemotron-super-49b-v1.5` | Nemotron Super 思考型：思维链消耗大量 max_tokens，有效速度慢 | 128K | ⚠️ 慢 |
+| `openai/gpt-oss-120b` | 开源旗舰（数学强 AIME 95.8 / 中文致命伤）：2026-08 实测连续读超时，暂留观察 | 128K | ❌ 超时 |
 
-> 更多模型可通过 `GET /v1/models` 查询（需有效 key），模型更新频繁，以官网为准。
+> 实测排除：`deepseek-v4-flash-0731`（读超时 ×2）、`stepfun-ai/step-3.7-flash`（HTTP 500）、`kimi-k2.6` / `mistralai/codestral-22b`（HTTP 404 免费账号无权限）。工具调用兼容性未逐一验证。
 
 ### Agnes AI（国际站 + 中国站）
 
@@ -294,7 +299,11 @@ pi -p --provider cloudflare --model cloudflare/@cf/openai/gpt-oss-120b "你好"
 | 硅基流动 | `deepseek-ai/DeepSeek-R1-0528-Qwen3-8B` | 8B dense (蒸馏) | 128K | 免费档内最强推理 | ✅ |
 | 魔塔社区 | `Qwen/Qwen3-Coder-30B-A3B-Instruct` | 30B MoE (3B 激活) | 128K | 中端编码向：SWE-bench Lite 49.7%（88 百分位）；**唯一开箱即用**的 ModelScope 模型 | ✅ |
 | 魔塔社区 | `deepseek-ai/DeepSeek-V4-Pro` | 1.6T MoE (49B 激活) | **1M** | 顶级推理 + **1M 超长上下文**（整仓库/长文档分析独一档）+ 中文世界知识第一（Chinese-SimpleQA 84.4，仅次 Gemini-3.1-Pro）；抽象推理偏弱（ARC-AGI-2 46%） | ❌ 需开通 |
-| NVIDIA | `openai/gpt-oss-120b` | 117B MoE (5.1B 激活) | 128K | 数学/工具调用强（AIME 95.8、Codeforces 2463，接近 o4-mini）；**中文致命伤**（C-Eval 42% vs MMLU 90%） | ✅ |
+| NVIDIA | `openai/gpt-oss-20b` | 20B MoE (3.6B 激活) | 128K | ⭐ 免费档实测最快（TTFB 0.8s / ~130 tok/s）；GPT-OSS 家族数学/工具调用强，中文偏弱 | ✅ |
+| NVIDIA | `minimaxai/minimax-m3` | — | 128K | 快速推理模型（TTFB 0.8s / ~70 tok/s） | ✅ |
+| NVIDIA | `nvidia/nemotron-3-nano-30b-a3b` | 30B MoE (3B 激活) | 128K | NVIDIA 自家思考型轻量模型（~80 tok/s） | ✅ |
+| NVIDIA | `moonshotai/kimi-k3` | — | 128K | Moonshot 旗舰，NIM 端生成偏慢 | ⚠️ 慢 |
+| NVIDIA | `openai/gpt-oss-120b` | 117B MoE (5.1B 激活) | 128K | 数学/工具调用强（AIME 95.8）；中文致命伤；2026-08 实测连续超时 | ❌ 超时 |
 | SenseNova | `glm-5.2` | — | 1M | 智谱旗舰长程任务：1M 上下文端到端开发管线 | ✅ |
 | SenseNova | `deepseek-v4-flash` | — | 1M | DeepSeek 高性能对话（thinking/非 thinking、工具调用） | ✅ |
 | SenseNova | `sensenova-6.8-flash-lite` | — | 256K | 新一代轻量多模态（文本+图像） | ✅ |
@@ -319,7 +328,7 @@ pi -p --provider cloudflare --model cloudflare/@cf/openai/gpt-oss-120b "你好"
 | 付费强推理（编码/科学/终端） | **Agnes `agnes-2.5-pro`**（1M 上下文，AA 智能榜 #9） |
 | 中文任务 | 硅基 `Qwen/Qwen3-8B`（免费）或魔塔 `DeepSeek-V4-Pro`（需开通，**勿用 GPT-OSS-120B**） |
 | 多模态（文本+图像） | SenseNova `sensenova-6.8-flash-lite`、Cloudflare `gemma-4-26b` 或 Agnes `agnes-2.5-flash` |
-| 英文数学、结构化输出 | **NVIDIA GPT-OSS-120B** |
+| 英文数学、结构化输出 | **NVIDIA GPT-OSS-20B**（快；120B 更强但 2026-08 实测超时） |
 | 海外网络兜底 / agent 工作流 | **Cloudflare `glm-4.7-flash`**（额度独立，工具调用完整兼容） |
 | 限流兜底、轻量快速 | ModelScope Qwen3-Coder-30B / 硅基 Qwen3-8B |
 
@@ -551,7 +560,7 @@ opencode run -m cloudflare-workers-ai/@cf/qwen/qwen2.5-coder-32b-instruct "你�
 opencode run -m sensenova/sensenova-6.7-flash-lite "你好"
 opencode run -m siliconflow/Qwen/Qwen3-8B "你好"
 opencode run -m modelscope/Qwen/Qwen3-Coder-30B-A3B-Instruct "你好"
-opencode run -m nvidia/openai/gpt-oss-120b "你好"
+opencode run -m nvidia/openai/gpt-oss-20b "你好"
 opencode run -m agnes/agnes-2.5-flash "你好"
 opencode run -m agnes-cn/agnes-2.5-flash "你好"
 
