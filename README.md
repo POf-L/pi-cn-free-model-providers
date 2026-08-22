@@ -163,6 +163,8 @@ pi -p --provider siliconflow --model siliconflow/Qwen/Qwen3-8B "你好"
 
 > 其余仍有免费的类别：向量 `BAAI/bge-m3` 等、重排序 `bge-reranker-v2-m3`、ASR `SenseVoiceSmall`/`TeleSpeechASR`、生图 `Kolors`（均非编码对话用途）。原免费标杆 `Qwen2.5-7B-Instruct` 已收费；`glm-4-9b-chat`、`Qwen2-7B-Instruct`、`DeepSeek-R1-Distill-Qwen-7B`、`bce` 向量/重排序等已下线。
 
+> 🔭 **变动监听**：`.github/workflows/siliconflow-watch.yml` 每周抓取官方更新公告（docs.siliconflow.cn/cn/release-notes，公开免鉴权），命中在册模型关键词（下线/计费调整/免费撤销）即自动开 issue——公告通常提前约 7 天发布，留足处置窗口。
+
 ### 魔塔社区 (ModelScope)
 
 阿里达摩院旗下，一个 Key 同时兼容 OpenAI + Anthropic 双协议，每日 2000 次免费调用。
@@ -204,6 +206,8 @@ pi -p --provider nvidia --model nvidia/openai/gpt-oss-20b "你好"
 
 > 实测排除：`deepseek-v4-flash-0731`（读超时 ×2）、`stepfun-ai/step-3.7-flash`（HTTP 500）、`kimi-k2.6` / `mistralai/codestral-22b`（HTTP 404 免费账号无权限）、`openai/gpt-oss-120b`（本地 + CI 双网络连续超时，巡检确认后移除；Cloudflare 站有同名模型兑底）。工具调用兼容性未逐一验证。
 
+> 🔭 **变动监听**：`.github/workflows/nvidia-watch.yml` 每周巡检（04:11 UTC）：匿名目录比对捕获下线/改名 + 仓库密钥对在册模型发微型流式探活（捕获「在册但不可用/无权限」）+ 重点厂商新增条目扫描提示评估收录；基线与指纹存 `.github/watch-state/` 由 workflow 自动提交。需配置 secret `NVIDIA_NIM_API_KEY`。
+
 ### Agnes AI（国际站 + 中国站）
 
 [Agnes AI](https://www.agnes-ai.com/zh-Hans/docs/overview) 的 OpenAI 兼容网关，国际站（`apihub.agnes-ai.com`）与中国站（`api.agnes-ai.cn`）各注册一个 provider，模型阵容一致。Flash 系当前限时免费（`$0 / 1M tokens`），Pro 系为付费推理模型。支持工具调用、图片理解（base64 data URL 实测可用）、思维模式（经 `chat_template_kwargs.enable_thinking` 开启，已接入 pi 的 `thinkingLevel`）；多轮历史回传 `reasoning_content` 实测兼容。
@@ -226,6 +230,8 @@ pi -p --provider agnes-cn --model agnes-cn/agnes-2.5-pro "你好"
 | `agnes-2.5-pro-alpha` | 打榜版付费推理模型（同上基准参考） | 1M | $0.45/M 输入、$0.90/M 输出 |
 
 > 图像/视频**生成**模型（`agnes-image-*`、`agnes-video-*`）与 chat completions 不兼容，未注册。
+
+> 🔭 **变动监听**：`.github/workflows/agnes-watch.yml` 每周巡检（04:35 UTC）：单模型文档页缺失＝疑似下线/改名；Flash 系文档「当前价格」非 $0＝限时免费撤销（最大风险）；参数指纹基线比对捕获原位升级/计费调整；`llms.txt` 全目录扫描发现新版本提示评估收录。全程匿名无需密钥。
 
 ### Cloudflare Workers AI
 
