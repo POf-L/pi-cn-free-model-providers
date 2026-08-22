@@ -1,0 +1,66 @@
+name: cloudflare-model-watch
+
+# Cloudflare Workers AI 按全局 Neurons 额度计费，不存在单模型"免费转付费"，
+# 主要变动模式是模型下线/改名（弃用会先在文档标注日期，最终从目录移除）。
+# 官方模型目录页公开免鉴权，直接与扩展内 CLOUDFLARE_MODELS 精确比对：
+# 在册模型从目录消失即失效（运行时 filterToLive 对 Cloudflare 不生效 ——
+# 其 /v1/models 端点按账号鉴权，匿名无法调用，故只能靠本工作流兜底）。
+# 数据源：https://developers.cloudflare.com/workers-ai/models/ （公开、无需鉴权）
+
+on:
+  schedule:
+    - cron: "47 3 * * 1" # 每周一 03:47 UTC（错开 siliconflow watch 的 03:23）
+  workflow_dispatch: {}
+
+permissions:
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch official Workers AI model catalog
+        run: |
+          curl -fsSL --max-time 60 \
+            "https://developers.cloudflare.com/workers-ai/models/" \
+            -o /tmp/catalog.html
+          wc -c /tmp/catalog.html
+
+      - name: Extract official catalog ids and curated ids
+        run: |
+          grep -o '@cf/[A-Za-z0-9._/-]*' /tmp/catalog.html \
+            | sed -E 's|[/._-]+$||' | sort -u > /tmp/live.txt
+          echo "官方目录 $(wc -l < /tmp/live.txt) 个模型"
+          awk '/^const CLOUDFLARE_MODELS/,/^\];/' pi-opencode-native-ext.mjs \
+            | grep -o 'id: "[^"]*"' | cut -d'"' -f2 > /tmp/curated.txt
+          echo "在册模型 $(wc -l < /tmp/curated.txt) 个:"
+          cat /tmp/curated.txt
+
+      - name: Detect curated models missing from official catalog
+        id: detect
+        run: |
+          : > /tmp/gone.txt
+          while IFS= read -r id; do
+            [ -z "$id" ] && continue
+            grep -qxF -- "$id" /tmp/live.txt || printf '%s\n' "$id" >> /tmp/gone.txt
+          done < /tmp/curated.txt
+          count=$(grep -c . /tmp/gone.txt || true)
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "从官方目录消失的在册模型 $count 个:"
+          cat /tmp/gone.txt
+
+      - name: Open issue when curated models left the catalog
+        if: steps.detect.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            printf '以下在册的 Cloudflare Workers AI 模型已从官方目录页消失（下线或改名），请核验并更新。\n\n'
+            printf '```\n%s\n```\n\n' "$(cat /tmp/gone.txt)"
+            printf '参考：\n- 官方目录: https://developers.cloudflare.com/workers-ai/models/\n- 平台变更公告: https://developers.cloudflare.com/changelog/\n- 更新位置: `CLOUDFLARE_MODELS`（pi-opencode-native-ext.mjs）、README Cloudflare 小节对应表格与兼容性矩阵\n'
+          } > /tmp/body.md
+          gh issue create \
+            --title "⚠️ Cloudflare 在册模型已从官方目录消失，请核验 ($(date +%F))" \
+            --body-file /tmp/body.md

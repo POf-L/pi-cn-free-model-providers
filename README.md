@@ -225,7 +225,9 @@ pi -p --provider agnes-cn --model agnes-cn/agnes-2.5-pro "你好"
 
 ### Cloudflare Workers AI
 
-Cloudflare 官方托管推理平台，走 **OpenAI 兼容端点**（`https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1`）。免费套餐每天 **10,000 Neurons**（UTC 0 点重置），在此额度内大部分模型免费调用。
+Cloudflare 官方托管推理平台，走 **OpenAI 兼容端点**（`https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1`）。注意它**没有免费模型清单**：全平台共享每天 **10,000 Neurons** 的免费算力（UTC 0 点重置），而每个模型的单价差异极大（输出单价最高与最低相差约 16 倍）——大模型重活一天可能只够几轮。定位建议：轻量问答 / 兜底备用，不适合当主力；下表给出逐模型换算。
+
+> 数据来源：官方定价页（developers.cloudflare.com/workers-ai/platform/pricing/），2026-08 实测抓取。
 
 #### 配置
 
@@ -239,18 +241,22 @@ export CLOUDFLARE_API_KEY=your-api-token
 
 （数据源：官方定价页 + `GET /accounts/{id}/ai/models/search`；仅注册免费额度内可用的模型）
 
-| 模型 ID | 说明 | 上下文 |
-|---|---|---|
-| `@cf/openai/gpt-oss-120b` | OpenAI 开源旗舰（编码/数学强） | 128K |
-| `@cf/openai/gpt-oss-20b` | 低延迟版 | 128K |
-| `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | 最强 Llama 3.3 | 128K |
-| `@cf/qwen/qwen3-30b-a3b-fp8` | Qwen3 MoE 高效 | 128K |
-| `@cf/qwen/qwen2.5-coder-32b-instruct` | 代码专用 | 128K |
-| `@cf/google/gemma-4-26b-a4b-it` | Google 多模态（文本+图像） | 128K |
-| `@cf/zai-org/glm-4.7-flash` | 131K 上下文 | 131K |
-| `@cf/deepseek-ai/deepseek-r1-distill-qwen-32b` | DeepSeek 推理 | 64K |
+| 模型 ID | 说明 | 上下文 | 免费额度 ≈ 纯输出/天* |
+|---|---|---|---|
+| `@cf/openai/gpt-oss-120b` | OpenAI 开源旗舰（编码/数学强） | 128K | ≈147K tokens |
+| `@cf/openai/gpt-oss-20b` | 低延迟版 | 128K | ≈367K tokens |
+| `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | 最强 Llama 3.3 | 128K | ⚠️ ≈49K tokens |
+| `@cf/qwen/qwen3-30b-a3b-fp8` | Qwen3 MoE 高效 | 128K | ≈328K tokens |
+| `@cf/qwen/qwen2.5-coder-32b-instruct` | 代码专用 | 128K | ≈110K tokens |
+| `@cf/google/gemma-4-26b-a4b-it` | Google 多模态（文本+图像） | 128K | ≈367K tokens |
+| `@cf/zai-org/glm-4.7-flash` | 131K 上下文 | 131K | ≈275K tokens |
+| `@cf/deepseek-ai/deepseek-r1-distill-qwen-32b` | DeepSeek 推理 | 64K | ⚠️ ≈23K tokens |
+
+\* 按 10,000 Neurons/天 ÷ 该模型每百万输出 token 的 neurons 单价估算，输入另计。⚠️ = 额度杀手：`deepseek-r1-distill` 输出单价高达 443,756 neurons/M（推理模型输出又长，最容易打穿当日额度）；`llama-3.3-70b-fast` 输出 204,805/M 且输入 26,668/M——塞一个 10 万 token 仓库上下文就吃掉日额度的 27%。
 
 > ⚠️ **付费模型未注册**：`deepseek-v4-flash-0731`、`deepseek-v4-pro-0813`、`glm-5.2`、`kimi-k2.6`、`kimi-k2.7-code` 需 Workers Paid 账单或 AI Gateway 预付额度，免费额度调用会失败，本扩展（及 opencode blacklist）已排除。
+
+> 🔭 **变动监听**：`.github/workflows/cloudflare-watch.yml` 每周抓取官方目录页（workers-ai/models/，公开免鉴权）与 `CLOUDFLARE_MODELS` 精确比对，在册模型从目录消失即自动开 issue。运行时 `filterToLive` 对 Cloudflare 不生效（其 models 端点按账号鉴权），此工作流是唯一兜底。
 
 #### 使用
 
@@ -262,7 +268,7 @@ pi -p --provider cloudflare --model cloudflare/@cf/openai/gpt-oss-120b "你好"
 
 - URL 路径内嵌账户 ID，`streamCloudflare` 在请求时从 `CLOUDFLARE_ACCOUNT_ID` 动态拼装；该变量缺失时立即报错而非静默失败。
 - 响应含 `reasoning_content`（思考）字段，扩展的标准 `processDelta` 已按 thinking 块处理并回传历史（与 DeepSeek V4 一致）。
-- 免费额度按 Neurons 计费（非 token），模型越强越费：70B 模型 ~0.29¢/K 输入、~2.25¢/K 输出；10K neurons 每天约能跑几十次轻量问答。
+- 免费额度按 Neurons 计费（非 token），且全平台共享日配额：编码场景单轮上下文动辄数万 token，输入消耗不可忽略（如 `qwen2.5-coder-32b` 输入高达 60,000 neurons/M，10 万 token 上下文 = 日额度的 60%）。轻量短对话一天几十次没问题；长上下文 agentic 任务请优先 SiliconFlow/Zen 等真免费档。
 
 #### 实测兼容性（2026-08，`/ai/v1/chat/completions` 端点）
 
