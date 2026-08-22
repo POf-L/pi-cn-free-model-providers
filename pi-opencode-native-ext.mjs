@@ -301,6 +301,27 @@ function makeOutput(model) {
 // Factory for standard OpenAI-compatible providers (no special headers/schema).
 // opts.maxTokens may be a number (all models) or a function (model) => number
 // to let each model use its own registered limit.
+// Provider-side model churn surfaces as distinctive upstream errors long before
+// our curated lists get updated. Recognize them and attach an actionable hint:
+// - 404 / "not found" / 已下线 → model deprecated or renamed;
+// - insufficient-balance → if the model is curated as free, that label is stale
+//   (it turned paid and just tried to bill the user). See also:
+//   .github/workflows/siliconflow-watch.yml (weekly official-announcements poll).
+function explainModelChurn(status, errText) {
+  const t = String(errText).toLowerCase();
+  if (
+    status === 404 ||
+    /model[\w-]{0,24}(not found|not exist|does not exist)/.test(t) ||
+    /(已下线|已不再提供|不存在|deprecated|no longer available)/.test(t)
+  ) {
+    return "Hint: this model may have been deprecated/renamed by the provider — check 模型广场 (https://cloud.siliconflow.cn/me/models) and update the curated list.";
+  }
+  if (/insufficient[ _-]?balance|余额不足/.test(t)) {
+    return "Hint: rejected for insufficient balance — if this model is labeled 免费 in the curated list, that label is stale (it has turned PAID). Update SILICONFLOW_MODELS accordingly.";
+  }
+  return "";
+}
+
 function makeOpenAIStream(baseUrl, envKey, opts = {}) {
   return function streamSimple(model, context, options) {
     const stream = new AssistantMessageEventStream();
@@ -442,7 +463,8 @@ async function run(stream, output, model, context, options, cfg) {
     });
     if (!response.ok) {
       const errText = await response.text();
-      throw new Error(`${model.provider} API request failed: ${response.status} ${response.statusText}. ${errText.slice(0, 300)}`);
+      const hint = explainModelChurn(response.status, errText);
+      throw new Error(`${model.provider} API request failed: ${response.status} ${response.statusText}. ${errText.slice(0, 300)}${hint ? `\n${hint}` : ""}`);
     }
     const reader = response.body.getReader();
     await consumeSSEStream(state, reader);
@@ -628,22 +650,56 @@ const SENSENOVA_MODELS = [
     maxTokens: 131072,
   },
 ];
+// 免费清单 2026-08-22 经模型广场 biz_info 计价接口逐个核验，并与 /v1/models 在架列表取交集。
+// 变动提示：nex-agi/Nex-N2-Pro 已转付费（输入¥0.00175/输出¥0.007 每K tokens）；
+// Qwen2.5-7B-Instruct 不再免费；glm-4-9b-chat、Qwen2-7B-Instruct、R1-Distill-Qwen-7B、
+// bce 向量/重排序等老牌免费模型均已下线。当前免费聊天模型仅剩以下小模型。
 const SILICONFLOW_MODELS = [
-  {
-    id: "nex-agi/Nex-N2-Pro",
-    name: "Nex-N2-Pro (397B MoE, 免费)",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text", "image"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 262144,
-    maxTokens: 65536,
-  },
   {
     id: "Qwen/Qwen3-8B",
     name: "Qwen3-8B (免费)",
     api: "openai-completions",
     reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 65536,
+  },
+  {
+    id: "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B",
+    name: "DeepSeek-R1-0528-Qwen3-8B (免费推理)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 65536,
+  },
+  {
+    id: "THUDM/GLM-Z1-9B-0414",
+    name: "GLM-Z1-9B (免费推理)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 32768,
+  },
+  {
+    id: "THUDM/GLM-4-9B-0414",
+    name: "GLM-4-9B-0414 (免费)",
+    api: "openai-completions",
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 32768,
+    maxTokens: 8192,
+  },
+  {
+    id: "Qwen/Qwen3.5-4B",
+    name: "Qwen3.5-4B (免费长上下文)",
+    api: "openai-completions",
+    reasoning: false,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 262144,
