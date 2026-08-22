@@ -266,7 +266,7 @@ export CLOUDFLARE_API_KEY=your-api-token
 
 > ⚠️ **付费模型未注册**：`deepseek-v4-flash-0731`、`deepseek-v4-pro-0813`、`glm-5.2`、`kimi-k2.6`、`kimi-k2.7-code` 需 Workers Paid 账单或 AI Gateway 预付额度，免费额度调用会失败，本扩展（及 opencode blacklist）已排除。
 
-> 🔭 **变动监听**：`.github/workflows/cloudflare-watch.yml` 每周抓取官方目录页（workers-ai/models/，公开免鉴权）与 `CLOUDFLARE_MODELS` 精确比对，在册模型从目录消失即自动开 issue。运行时 `filterToLive` 对 Cloudflare 不生效（其 models 端点按账号鉴权），此工作流是唯一兜底。
+> 🔭 **变动监听**：`.github/workflows/cloudflare-watch.yml` 每周巡检（03:47 UTC）双向检测：① 在册模型从官方目录页消失即报——运行时 `filterToLive` 对 Cloudflare 不生效（其 models 端点按账号鉴权），此工作流是唯一兜底；② 新模型发现——官方定价页按模型列出 Neurons 单价，新上架即被捕获，并自动按 10,000 Neurons/天免费额度换算日输出预算分级提示（≥100K tokens/天“优先评估”、30–100K“可用但偏耗额度”、<30K“额度杀手”；对标 gpt-oss-120b ≈147K）。基线存 `.github/watch-state/` 由 workflow 自动提交，全程匿名无需密钥。
 
 #### 使用
 
