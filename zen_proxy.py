@@ -417,6 +417,40 @@ class ZenProxyHandler(BaseHTTPRequestHandler):
         print(" | ".join(parts), flush=True)
 
 
+def _get_system_proxy_from_registry():
+    """绕过 getproxies 的 NO_PROXY 短路，直接读注册表获取系统代理。"""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings") as key:
+            try:
+                enabled, _ = winreg.QueryValueEx(key, "ProxyEnable")
+            except FileNotFoundError:
+                enabled = 0
+            if not enabled:
+                return ""
+            try:
+                server, _ = winreg.QueryValueEx(key, "ProxyServer")
+            except FileNotFoundError:
+                return ""
+            server = (server or "").strip()
+            if not server:
+                return ""
+            # 可能为 "http=127.0.0.1:1086;https=127.0.0.1:1086" 或单一 "127.0.0.1:1086"
+            for part in server.split(";"):
+                part = part.strip()
+                if not part:
+                    continue
+                if "=" in part:
+                    proto, addr = part.split("=", 1)
+                    if proto.lower() in ("https", "http"):
+                        return "http://" + addr if "://" not in addr else addr
+                else:
+                    return "http://" + part if "://" not in part else part
+            return ""
+    except Exception:
+        return ""
+
+
 def _resolve_proxy():
     """解析上游代理设置。
 
@@ -431,6 +465,9 @@ def _resolve_proxy():
     if not url:
         proxies = urllib.request.getproxies()
         url = proxies.get("https") or proxies.get("http") or ""
+        # 兼容 NO_PROXY 导致 getproxies 短路不读注册表的缺陷
+        if not url:
+            url = _get_system_proxy_from_registry()
     if not url:
         return None
     if not explicit and urllib.request.proxy_bypass(upstream_host):
