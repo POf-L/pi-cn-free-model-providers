@@ -1,12 +1,13 @@
 """OpenCode Zen 会话标识替换代理
 
-opencode 客户端 -> 本代理(替换会话标识, 每请求随机) -> https://opencode.ai/zen/v1
+opencode 客户端 -> 本代理(保留字段并替换身份值) -> https://opencode.ai/zen/v1
 
 策略:
     - 识别现有会话标识头, 用假标识替换, 不剥离
     - 同一会话在轮换窗口内映射到同一假标识(不同会话互不相同), 保持请求关联性
-    - 默认每 10 分钟整批轮换一次, 窗口结束后生成全新假标识(--rotate-seconds 调整)
-    - 保留 x-opencode-client, 避免 Zen 将请求识别为匿名客户端而被限流
+    - 默认每 10 分钟整批轮换一次, 窗口结束后生成全新假标识(--rotation 调整)
+    - 保留客户端和请求体结构, 避免 Zen 将请求识别为匿名请求而被限流
+    - 插件提供轮次标记时, 同一用户消息保持稳定, 新消息使用全新假标识
 
 用法:
     python zen_proxy.py --port 8643
@@ -43,19 +44,25 @@ HOP_HEADERS = {
 DEFAULT_REWRITE_HEADERS = {
     "x-opencode-session": "ses_",
     "x-session-id": "ses_",
+    "x-session-affinity": "ses_",
     "x-parent-session-id": "ses_",
     "x-opencode-project": "proj_",
+    "x-opencode-directory": "dir_",
+    "x-opencode-workspace": "wrk_",
     "x-opencode-request": "req_",
     "x-opencode-request-id": "req_",
     "x-request-id": "req_",
 }
+SESSION_HEADERS = {"x-opencode-session", "x-session-id", "x-session-affinity"}
+REQUEST_HEADERS = {"x-opencode-request", "x-opencode-request-id", "x-request-id"}
+ROUND_HEADER = "x-zen-proxy-round"
 
 
 class IdentityMapper:
     def __init__(self, rotation):
         self.rotation = rotation
         self.lock = threading.Lock()
-        self.epoch = 0
+        self.epoch = None
         self.map = {}
 
     def _current_epoch(self):
@@ -63,18 +70,36 @@ class IdentityMapper:
             return 0
         return int(time.time() // self.rotation)
 
-    def fake(self, real, prefix):
+    def _refresh_epoch(self):
+        epoch = self._current_epoch()
+        if epoch != self.epoch:
+            self.epoch = epoch
+            self.map = {}
+
+    def fake(self, real, prefix, scope=""):
         if not real:
             return real
         with self.lock:
-            epoch = self._current_epoch()
-            if epoch != self.epoch:
-                self.epoch = epoch
-                self.map = {}
-            fake = self.map.get(real)
+            self._refresh_epoch()
+            key = (scope, prefix, real)
+            fake = self.map.get(key)
             if fake is None:
                 fake = prefix + "".join(random.choices(string.ascii_letters + string.digits, k=22))
-                self.map[real] = fake
+                self.map[key] = fake
+            return fake
+
+    def fake_group(self, values, prefix, scope=""):
+        values = [value for value in values if value]
+        if not values:
+            return ""
+        with self.lock:
+            self._refresh_epoch()
+            fake = next((self.map.get((scope, prefix, value)) for value in values
+                         if self.map.get((scope, prefix, value))), None)
+            if fake is None:
+                fake = prefix + "".join(random.choices(string.ascii_letters + string.digits, k=22))
+            for value in values:
+                self.map[(scope, prefix, value)] = fake
             return fake
 
     def random_id(self, prefix):
@@ -105,6 +130,57 @@ upstream_timeout = 0
 sse_keepalive = 15
 
 
+def _metadata_key(key):
+    return "".join(ch.lower() for ch in str(key) if ch.isalnum())
+
+
+def _metadata_prefix(key):
+    normalized = _metadata_key(key)
+    if "request" in normalized:
+        return "req_"
+    if "project" in normalized:
+        return "proj_"
+    if "session" in normalized or "parent" in normalized:
+        return "ses_"
+    if any(part in normalized for part in (
+        "user", "email", "account", "organization", "workspace", "directory", "device", "client", "installation",
+    )):
+        return "usr_"
+    return None
+
+
+def _fake_value(value, prefix, scope):
+    if value is None:
+        return value
+    text = str(value)
+    return identity_mapper.fake(text, prefix, scope) if text else identity_mapper.random_id(prefix)
+
+
+def _sanitize_metadata(value, scope, key=""):
+    prefix = _metadata_prefix(key)
+    if prefix and value is not None and not isinstance(value, (dict, list)):
+        return _fake_value(value, prefix, scope)
+    if isinstance(value, dict):
+        return {name: _sanitize_metadata(item, scope, name) for name, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_metadata(item, scope, key) for item in value]
+    return value
+
+
+def _sanitize_request_body(obj, scope):
+    for key in list(obj):
+        normalized = _metadata_key(key)
+        if normalized == "user":
+            value = obj[key]
+            if value is not None and not isinstance(value, (dict, list)):
+                obj[key] = _fake_value(value, "usr_", scope)
+            else:
+                obj[key] = _sanitize_metadata(value, scope, key)
+        elif normalized == "metadata":
+            obj[key] = _sanitize_metadata(obj[key], scope, key)
+    return obj
+
+
 class ZenProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -127,33 +203,60 @@ class ZenProxyHandler(BaseHTTPRequestHandler):
 
         split = urllib.parse.urlsplit(self.path)
         path = split.path
+        if self.command == "GET" and path == "/__zen_proxy_health":
+            self.close_connection = True
+            return self._send_json(200, {
+                "service": "zen_proxy",
+                "pid": os.getpid(),
+                "rotation": identity_mapper.rotation,
+            })
         if path.startswith("/v1"):
             path = path[3:]
         upstream_path = upstream_prefix + path
         if split.query:
             upstream_path += "?" + split.query
 
+        round_scope = self.headers.get(ROUND_HEADER, "")
+        session_values = []
+        session_header_present = False
+        for key, value in self.headers.items():
+            if key.lower() in SESSION_HEADERS:
+                session_header_present = True
+                if value:
+                    session_values.append(value)
+        session_fake = identity_mapper.fake_group(session_values, "ses_", round_scope)
+        if session_header_present and not session_fake:
+            session_fake = identity_mapper.random_id("ses_")
+        request_fake = identity_mapper.random_id("req_")
+
         headers = {}
         for key, value in self.headers.items():
             lkey = key.lower()
-            if lkey in HOP_HEADERS or lkey in strip_headers:
+            if lkey in HOP_HEADERS or lkey in strip_headers or lkey == ROUND_HEADER:
                 continue
-            if rewrite_enabled and lkey in DEFAULT_REWRITE_HEADERS:
-                prefix = DEFAULT_REWRITE_HEADERS[lkey]
-                if prefix == "req_":
-                    value = identity_mapper.random_id(prefix)
-                else:
-                    value = identity_mapper.fake(value, prefix)
-            headers[key] = value
+            if rewrite_enabled:
+                if lkey in SESSION_HEADERS:
+                    value = session_fake
+                elif lkey == "x-parent-session-id":
+                    value = _fake_value(value, "ses_", round_scope)
+                elif lkey == "x-opencode-project":
+                    value = _fake_value(value, "proj_", round_scope)
+                elif lkey == "x-opencode-directory":
+                    value = _fake_value(value, "dir_", round_scope)
+                elif lkey == "x-opencode-workspace":
+                    value = _fake_value(value, "wrk_", round_scope)
+                elif lkey in REQUEST_HEADERS:
+                    value = request_fake
+            headers[lkey] = value
 
-        if inject_client and "x-opencode-client" not in headers:
+        if inject_client and not headers.get("x-opencode-client", "").strip():
             headers["x-opencode-client"] = inject_client
 
         for h in extra_headers:
             name, sep, value = h.partition(":")
             name = name.strip()
             if sep and name:
-                headers[name] = value.strip()
+                headers[name.lower()] = value.strip()
 
         if not quiet:
             self._log_request(headers, upstream_path)
@@ -164,8 +267,7 @@ class ZenProxyHandler(BaseHTTPRequestHandler):
             except ValueError:
                 obj = None
             if isinstance(obj, dict):
-                obj.pop("user", None)
-                obj.pop("metadata", None)
+                _sanitize_request_body(obj, round_scope)
                 body = json.dumps(obj).encode()
 
         conn = _upstream_connection()
@@ -377,7 +479,7 @@ def main():
     parser.add_argument("--strip", action="append", default=[],
                         help="additional header names to remove entirely (lowercase)")
     parser.add_argument("--no-sanitize-body", action="store_true",
-                        help="do not remove user/metadata from request body")
+                        help="do not sanitize identity values in request body")
     parser.add_argument("--quiet", action="store_true",
                         help="do not log per-request lines")
     parser.add_argument("--inject-client", default="cli",
@@ -405,7 +507,7 @@ def main():
     upstream_ssl = not args.no_ssl
     identity_mapper = IdentityMapper(args.rotation)
     rewrite_enabled = not args.no_rewrite
-    strip_headers = set(args.strip)
+    strip_headers = {name.lower() for name in args.strip}
     sanitize_body = not args.no_sanitize_body
     quiet = args.quiet
     inject_client = args.inject_client
