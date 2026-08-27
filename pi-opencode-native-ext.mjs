@@ -6,6 +6,8 @@ import { randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
+import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { Markdown } from "@earendil-works/pi-tui";
 
 // ── Push-based stream (copied from pi-free lib/assistant-message-event-stream.js) ──
 class EventStream {
@@ -1059,7 +1061,30 @@ function initialModels() {
   };
 }
 
+// Derive a capabilities block from a model's existing reasoning/input fields so
+// /opencode-capabilities can report per-model abilities without re-deriving them.
+// OpenCode-native intentionally does not register image/video/audio generation
+// models (they are not chat completions), so those stay false here.
+function withCapabilities(model) {
+  const input = Array.isArray(model.input) ? model.input : ["text"];
+  return {
+    ...model,
+    capabilities: {
+      tools: true,
+      vision: input.includes("image"),
+      image: false,
+      video: false,
+      audio: false,
+      reasoning: !!model.reasoning,
+    },
+  };
+}
+
 function registerAll(pi, m) {
+  // Augment each model with a capabilities block (derived from reasoning/input).
+  for (const key of Object.keys(m)) {
+    if (Array.isArray(m[key])) m[key] = m[key].map(withCapabilities);
+  }
   pi.registerProvider("opencode-fix", {
     name: "OpenCode Zen (native headers)",
     apiKey: "public",
@@ -1126,6 +1151,89 @@ function registerAll(pi, m) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// /opencode-capabilities — per-model capability table across all providers
+// ---------------------------------------------------------------------------
+
+const OPENCODE_PROVIDER_IDS = [
+  "opencode-fix",
+  "sensenova",
+  "siliconflow",
+  "modelscope",
+  "nvidia",
+  "cloudflare",
+  "agnes",
+  "agnes-cn",
+];
+
+function registerCapabilitiesCommand(pi) {
+  const flags = {
+    reasoning: "reasoning",
+    vision: "vision",
+    image: "image",
+    video: "video",
+    audio: "audio",
+    tools: "tools",
+  };
+
+  pi.registerCommand("opencode-capabilities", {
+    description:
+      "List OpenCode-native model capabilities (vision/image/video/audio/tools/reasoning) across all providers; e.g. /opencode-capabilities vision",
+    handler: async (args, ctx) => {
+      const tokens = (args || "").trim().split(/\s+/).filter(Boolean);
+      const filter = tokens.find((token) => token in flags);
+      const models = (pi.modelRegistry?.getAvailable?.() ?? []).filter((m) =>
+        OPENCODE_PROVIDER_IDS.includes(m.provider),
+      );
+
+      const rows = models
+        .map((model) => {
+          const caps = model.capabilities ?? {};
+          return {
+            provider: model.provider,
+            id: model.id,
+            reasoning: caps.reasoning ? "✓" : "",
+            vision: caps.vision ? "✓" : "",
+            image: caps.image ? "✓" : "",
+            video: caps.video ? "✓" : "",
+            audio: caps.audio ? "✓" : "",
+            tools: caps.tools ? "✓" : "",
+          };
+        })
+        .filter((row) => !filter || row[flags[filter]] === "✓")
+        .sort((a, b) =>
+          a.provider === b.provider ? a.id.localeCompare(b.id) : a.provider.localeCompare(b.provider),
+        );
+
+      const markdown = [
+        `# OpenCode-native model capabilities${filter ? ` (filter: ${filter})` : ""}`,
+        "",
+        "| Provider | Model | Reasoning | Vision | Image | Video | Audio | Tools |",
+        "|---|---|:---:|:---:|:---:|:---:|:---:|:---:|",
+        ...rows.map(
+          (row) =>
+            `| ${row.provider} | ${row.id} | ${row.reasoning || "—"} | ${row.vision || "—"} | ${row.image || "—"} | ${row.video || "—"} | ${row.audio || "—"} | ${row.tools || "—"} |`,
+        ),
+        "",
+        "_Capabilities are derived from each curated model's reasoning/input fields. Image/video/audio generation models are not chat completions and are intentionally not registered._",
+      ].join("\n");
+
+      if (ctx.mode === "tui") {
+        pi.appendEntry("opencode-capabilities", { markdown });
+      } else if (ctx.hasUI) {
+        ctx.ui.notify(markdown, "info");
+      } else {
+        console.log(markdown);
+      }
+    },
+  });
+
+  pi.registerEntryRenderer("opencode-capabilities", (entry) => {
+    const mdTheme = getMarkdownTheme();
+    return new Markdown(entry.data.markdown, 1, 0, mdTheme);
+  });
+}
+
 // Background drift/probe pass. Best-effort: a failure leaves the already
 // registered (curated or cached) models untouched, so the user is never blocked.
 async function verifyAndUpdateModels(pi) {
@@ -1164,6 +1272,7 @@ export default function (pi) {
   // drift/probe pass runs in the background and hot-swaps the catalog without a
   // /reload.
   registerAll(pi, initialModels());
+  registerCapabilitiesCommand(pi);
   setTimeout(() => {
     verifyAndUpdateModels(pi).catch(() => {});
   }, 100);

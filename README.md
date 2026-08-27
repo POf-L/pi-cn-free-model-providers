@@ -619,6 +619,10 @@ opencode 原生方式不经过 `cleanBody`，但实测标准对话/工具调用�
 
 13. **Zen 免费模型自动发现 + 免费状态复核（1.0.7 起）**：Zen 供应商在启动后会在**后台**对实时列表中的**全部模型逐个发探测请求**（`max_tokens: 1` 的小请求，8 路并发）：匿名 `public` key 能返回 200 即判定免费（付费模型在鉴权阶段就被 401 拒绝，不计费）；若设置了真实 `OPENCODE_API_KEY`，则改用响应中的 `cost` 字段是否为 0 判定。因此：① 不在白名单的新免费模型**无需等插件发版即可直接使用**（自动注册，保守 metadata：上下文 128K / 输出 64K，名称即模型 ID）；② **白名单模型若被官方转为付费，即使仍在 `/v1/models` 里也会被自动剔除**，避免匿名下报错、配了真实 key 时被误扣费。探测结果分三档：`free`（保留/新增）、`paid`（剔除）、`unknown`（网络故障等，一律保留原状，瞬时故障不会清空列表；全部 unknown 时回退到白名单 ∩ 实时列表）。白名单条目始终优先（元数据更精确），想要补全显示名/上下文窗口可在白名单中加正式条目。
 
+## 命令
+
+- `/opencode-capabilities [image|video|audio|vision|reasoning|tools]` — 列出本扩展注册的全部 provider（`opencode-fix` / `sensenova` / `siliconflow` / `modelscope` / `nvidia` / `cloudflare` / `agnes` / `agnes-cn`）下每个模型的能力（vision / image / video / audio / tools / reasoning），可选过滤参数只看某类能力。能力由每个精选模型的 `reasoning` / `input` 字段推导；图像/视频/音频生成类模型不是 chat completions，按设计不注册。
+
 ## ModLens 视觉引擎切换
 
 若安装了 [ModLens](https://github.com/liustack/modlens) 技能（`~/.agents/skills/modlens`），可通过以下命令在已配置的视觉引擎间切换：
