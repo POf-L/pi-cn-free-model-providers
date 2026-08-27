@@ -3,6 +3,9 @@
 // (x-opencode-client: cli + ses_/msg_ ULID ids) and converting
 // developer->system roles (upstream only accepts system/user/assistant).
 import { randomBytes } from "node:crypto";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { homedir } from "node:os";
 
 // ── Push-based stream (copied from pi-free lib/assistant-message-event-stream.js) ──
 class EventStream {
@@ -1002,13 +1005,132 @@ async function verifyZenModels(liveIds) {
 }
 
 // ── Extension entry ──
-export default async function (pi) {
-  // Drift detection: intersect each curated allowlist with the provider's
-  // live /v1/models. Models that left the free tier / were renamed are dropped
-  // automatically. Fetch failures fall back to the curated list so registration
-  // never breaks. For Zen, every live model is additionally probe-verified as
-  // still free (see verifyZenModels above) — this also drops models that
-  // switched to paid while remaining listed.
+// ── Non-blocking startup: register curated/cached lists immediately, then
+// drift-detect live in the background so Pi never waits on the network. ──
+
+const OPENCODE_CACHE_FILE = join(homedir(), ".pi", "cache", "opencode-native-models.json");
+const OPENCODE_CACHE_TTL = 24 * 60 * 60 * 1000;
+
+function loadCache() {
+  try {
+    const data = JSON.parse(readFileSync(OPENCODE_CACHE_FILE, "utf-8"));
+    if (!data || typeof data.timestamp !== "number") return null;
+    if (Date.now() - data.timestamp > OPENCODE_CACHE_TTL) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function saveCache(models) {
+  try {
+    const dir = dirname(OPENCODE_CACHE_FILE);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(OPENCODE_CACHE_FILE, JSON.stringify({ timestamp: Date.now(), ...models }));
+  } catch {
+    // best-effort; the cache is an optimization, never required
+  }
+}
+
+function curatedModels() {
+  return {
+    zen: ZEN_FREE_MODELS,
+    sensenova: SENSENOVA_MODELS,
+    siliconflow: SILICONFLOW_MODELS,
+    modelscope: MODELSCOPE_MODELS,
+    nvidia: NVIDIA_MODELS,
+    cloudflare: CLOUDFLARE_MODELS,
+    agnes: AGNES_MODELS,
+  };
+}
+
+function initialModels() {
+  const cache = loadCache();
+  if (!cache) return curatedModels();
+  const curated = curatedModels();
+  return {
+    zen: cache.zen ?? curated.zen,
+    sensenova: cache.sensenova ?? curated.sensenova,
+    siliconflow: cache.siliconflow ?? curated.siliconflow,
+    modelscope: cache.modelscope ?? curated.modelscope,
+    nvidia: cache.nvidia ?? curated.nvidia,
+    cloudflare: curated.cloudflare,
+    agnes: cache.agnes ?? curated.agnes,
+  };
+}
+
+function registerAll(pi, m) {
+  pi.registerProvider("opencode-fix", {
+    name: "OpenCode Zen (native headers)",
+    apiKey: "public",
+    baseUrl: "https://opencode.ai/zen/v1",
+    api: "openai-completions",
+    streamSimple: streamOpenCode,
+    models: m.zen,
+  });
+  pi.registerProvider("sensenova", {
+    name: "SenseNova (商汤日日新)",
+    apiKey: "public",
+    baseUrl: "https://token.sensenova.cn/v1",
+    api: "openai-completions",
+    streamSimple: streamSenseNova,
+    models: m.sensenova,
+  });
+  pi.registerProvider("siliconflow", {
+    name: "硅基流动 (SiliconFlow)",
+    apiKey: "public",
+    baseUrl: "https://api.siliconflow.cn/v1",
+    api: "openai-completions",
+    streamSimple: streamSiliconFlow,
+    models: m.siliconflow,
+  });
+  pi.registerProvider("modelscope", {
+    name: "魔塔社区 (ModelScope)",
+    apiKey: "public",
+    baseUrl: "https://api-inference.modelscope.cn/v1",
+    api: "openai-completions",
+    streamSimple: streamModelScope,
+    models: m.modelscope,
+  });
+  pi.registerProvider("nvidia", {
+    name: "NVIDIA NIM",
+    apiKey: "public",
+    baseUrl: "https://integrate.api.nvidia.com/v1",
+    api: "openai-completions",
+    streamSimple: streamNvidia,
+    models: m.nvidia,
+  });
+  pi.registerProvider("cloudflare", {
+    name: "Cloudflare Workers AI (免费额度)",
+    apiKey: "public",
+    baseUrl: "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
+    api: "openai-completions",
+    streamSimple: streamCloudflare,
+    models: m.cloudflare,
+  });
+  pi.registerProvider("agnes", {
+    name: "Agnes AI (国际站)",
+    apiKey: "public",
+    baseUrl: "https://apihub.agnes-ai.com/v1",
+    api: "openai-completions",
+    streamSimple: streamAgnes,
+    models: m.agnes,
+  });
+  pi.registerProvider("agnes-cn", {
+    name: "Agnes AI (中国站)",
+    apiKey: "public",
+    baseUrl: "https://api.agnes-ai.cn/v1",
+    api: "openai-completions",
+    streamSimple: streamAgnesCN,
+    models: m.agnes,
+  });
+}
+
+// Background drift/probe pass. Best-effort: a failure leaves the already
+// registered (curated or cached) models untouched, so the user is never blocked.
+async function verifyAndUpdateModels(pi) {
+  // Overall safety net so a pathological network can never strand this task.
+  const signal = AbortSignal.timeout(45000);
   const zenHeaders = {
     ...OPENCODE_STATIC_HEADERS,
     Authorization: `Bearer ${process.env.OPENCODE_API_KEY ?? "public"}`,
@@ -1022,72 +1144,27 @@ export default async function (pi) {
     filterToLive(AGNES_MODELS, "https://apihub.agnes-ai.com/v1/models", authHeader("AGNES_API_KEY")),
   ]);
   const zenModels = zenLive ? await verifyZenModels(zenLive) : ZEN_FREE_MODELS;
-  // Cloudflare has no anonymous /v1/models (account-scoped search endpoint);
-  // paid models are excluded via the opencode blacklist instead. Keep curated.
-  const cloudflareModels = CLOUDFLARE_MODELS;
+  const verified = {
+    zen: zenModels,
+    sensenova: sensenovaModels,
+    siliconflow: siliconflowModels,
+    modelscope: modelscopeModels,
+    nvidia: nvidiaModels,
+    cloudflare: CLOUDFLARE_MODELS,
+    agnes: agnesModels,
+  };
+  registerAll(pi, verified);
+  saveCache(verified);
+}
 
-  pi.registerProvider("opencode-fix", {
-    name: "OpenCode Zen (native headers)",
-    apiKey: "public",
-    baseUrl: "https://opencode.ai/zen/v1",
-    api: "openai-completions",
-    streamSimple: streamOpenCode,
-    models: zenModels,
-  });
-  pi.registerProvider("sensenova", {
-    name: "SenseNova (商汤日日新)",
-    apiKey: "public",
-    baseUrl: "https://token.sensenova.cn/v1",
-    api: "openai-completions",
-    streamSimple: streamSenseNova,
-    models: sensenovaModels,
-  });
-  pi.registerProvider("siliconflow", {
-    name: "硅基流动 (SiliconFlow)",
-    apiKey: "public",
-    baseUrl: "https://api.siliconflow.cn/v1",
-    api: "openai-completions",
-    streamSimple: streamSiliconFlow,
-    models: siliconflowModels,
-  });
-  pi.registerProvider("modelscope", {
-    name: "魔塔社区 (ModelScope)",
-    apiKey: "public",
-    baseUrl: "https://api-inference.modelscope.cn/v1",
-    api: "openai-completions",
-    streamSimple: streamModelScope,
-    models: modelscopeModels,
-  });
-  pi.registerProvider("nvidia", {
-    name: "NVIDIA NIM",
-    apiKey: "public",
-    baseUrl: "https://integrate.api.nvidia.com/v1",
-    api: "openai-completions",
-    streamSimple: streamNvidia,
-    models: nvidiaModels,
-  });
-  pi.registerProvider("cloudflare", {
-    name: "Cloudflare Workers AI (免费额度)",
-    apiKey: "public",
-    baseUrl: "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
-    api: "openai-completions",
-    streamSimple: streamCloudflare,
-    models: cloudflareModels,
-  });
-  pi.registerProvider("agnes", {
-    name: "Agnes AI (国际站)",
-    apiKey: "public",
-    baseUrl: "https://apihub.agnes-ai.com/v1",
-    api: "openai-completions",
-    streamSimple: streamAgnes,
-    models: agnesModels,
-  });
-  pi.registerProvider("agnes-cn", {
-    name: "Agnes AI (中国站)",
-    apiKey: "public",
-    baseUrl: "https://api.agnes-ai.cn/v1",
-    api: "openai-completions",
-    streamSimple: streamAgnesCN,
-    models: agnesModels,
-  });
+// ── Extension entry ──
+export default function (pi) {
+  // Register immediately with the curated allowlists (or a fresh on-disk cache)
+  // so Pi startup is never blocked on network model discovery. The live
+  // drift/probe pass runs in the background and hot-swaps the catalog without a
+  // /reload.
+  registerAll(pi, initialModels());
+  setTimeout(() => {
+    verifyAndUpdateModels(pi).catch(() => {});
+  }, 100);
 }
