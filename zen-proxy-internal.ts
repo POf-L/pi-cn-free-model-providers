@@ -66,9 +66,9 @@ function portOpen(port: number, host = HOST): Promise<boolean> {
   })
 }
 
-async function proxyHealthy(): Promise<boolean> {
+async function proxyHealthy(timeoutMs = 2000): Promise<boolean> {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 800)
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
     const response = await fetch(HEALTH_URL, {
       method: "GET",
@@ -78,6 +78,29 @@ async function proxyHealthy(): Promise<boolean> {
     if (!response.ok) return false
     const body = await response.json() as { service?: unknown }
     return body.service === "zen_proxy"
+  } catch {
+    return false
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function isNonZenHttpOccupant(): Promise<boolean> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 1200)
+  try {
+    const response = await fetch(HEALTH_URL, {
+      method: "GET",
+      signal: controller.signal,
+      cache: "no-store",
+    })
+    if (!response.ok) return true
+    try {
+      const body = await response.json() as { service?: unknown }
+      return body.service !== "zen_proxy"
+    } catch {
+      return true
+    }
   } catch {
     return false
   } finally {
@@ -147,12 +170,36 @@ function ensureZenProxy(): Promise<void> {
       log(`本地代理已就绪：${HOST}:${PORT}`)
       return
     }
+    // 端口能连上但健康检查不通 ≠ 被占用：可能是刚启动/抖动/超时，
+    // 此时若直接抛“被非 zen_proxy 占用”会误报。先重试健康检查，给启动中的代理留窗口
     if (await portOpen(PORT)) {
-      throw new Error(`端口 ${PORT} 已被非 zen_proxy 服务占用`)
+      for (let i = 0; i < 6; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 500))
+        if (await proxyHealthy()) {
+          log(`本地代理已就绪（重试后）：${HOST}:${PORT}`)
+          return
+        }
+      }
+      if (await isNonZenHttpOccupant()) {
+        throw new Error(`端口 ${PORT} 已被非 zen_proxy 服务占用`)
+      }
+      // TCP 能连但 HTTP 无明确非 zen 指纹：大概率是 zen 启动中/僵死/抖动，
+      // 不按“占用”处理，继续走启动流程让系统 bind 结果决定，避免把 TIME_WAIT/半启动误判为占用
+      log(`端口 ${PORT} 可连接但健康检查持续失败且无非 zen 指纹，尝试启动/接管代理…`)
     }
     log(`正在启动本地代理：${SCRIPT_PATH}`)
     const child = await launchProxy()
     if (!(await waitForProxy(child))) {
+      // 启动后仍不健康，区分是“真被占用”还是“启动失败”
+      if (await proxyHealthy()) {
+        log(`本地代理已就绪（启动后）：${HOST}:${PORT}`)
+        return
+      }
+      if (await portOpen(PORT)) {
+        throw new Error(
+          `端口 ${PORT} 无法拉起 zen_proxy，且健康检查失败。请排查：1) netstat -ano | findstr ${PORT} 看 PID；2) 若 PID 非 python.exe 的 zen_proxy.py 则为真占用，请改 ZEN_PROXY_PORT 或释放端口；3) 若是 python.exe 占用但健康失败，查看 D:\\WindowsTemp\\opencode\\zen-proxy-start.log`,
+        )
+      }
       throw new Error(`本地代理在 ${START_TIMEOUT_MS} 毫秒内未就绪`)
     }
     log(`本地代理启动完成：${HOST}:${PORT}`)
