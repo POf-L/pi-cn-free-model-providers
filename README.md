@@ -24,7 +24,7 @@ pi 内置的 opencode provider 不使用 opencode UA，因此直接调用免费�
 - 发现结果**热更新**目录（pi 在加载后注册 provider 会立即生效，无需 `/reload`）；
 - 结果持久化到 `~/.pi/cache/opencode-native-models.json`（24h TTL）。下次启动即使**完全离线**，也能用缓存里的模型列表秒开；缓存过期或缺失时回退到内置白名单。
 
-> 行为等价于 agnes / sensenova 扩展的 `refreshModels` 模式；opencode 因一次注册 8 个 provider（含 Zen 免费通道），故用「后台热重注册」实现同样的非阻塞效果。
+> 行为等价于 agnes / sensenova 扩展的 `refreshModels` 模式；本扩展一次注册多个供应商（含 OpenCode Zen 免费通道），故用「后台热重注册」实现同样的非阻塞效果。
 
 ## 安装
 
@@ -53,6 +53,21 @@ npm 包名为 `pi-cn-free-model-providers`（发布后安装）：
 ```bash
 pi install npm:pi-cn-free-model-providers
 ```
+
+#### npm 发布
+
+仓库已配置 `.github/workflows/publish-npm.yml`，支持以下发布方式：
+
+- 发布 GitHub Release 后自动发布到 npm；
+- 在 GitHub Actions 中手动运行，并选择 npm dist-tag。
+
+发布前请先递增 `package.json` 的 `version`，并在仓库的 **Settings → Secrets and variables → Actions** 中配置：
+
+```text
+NPM_TOKEN=<具有发布权限的 npm Granular Access Token>
+```
+
+Workflow 会自动校验包名、入口文件和 npm 打包内容，并使用 `--provenance` 发布公开包。
 
 ## 配置
 
@@ -630,7 +645,7 @@ opencode 原生方式不经过 `cleanBody`，但实测标准对话/工具调用�
 6. **单文件可审计**：整个扩展就是一个 `.mjs` 文件，使用前建议通读确认无异常行为。
 7. **代理会导致 500**：Zen API 请求**不能走 HTTP 代理**（实测经 v2rayN/Clash 等代理转发返回 500 Internal server error，直连正常）。若系统全局代理已开启（Windows WinINET），node/bun 的 fetch 默认不读系统代理所以不受影响，但请勿为此扩展显式设置 `HTTPS_PROXY`/`HTTP_PROXY` 环境变量指向代理。
 8. **DeepSeek V4 思维模式回传**：`deepseek-v4-flash`（通过 SenseNova 等）思维模式开启时，DeepSeek 要求历史中 assistant 消息（尤其带 `tool_calls` 的轮次）必须回传 `reasoning_content`，缺失即报 `400 The reasoning_content in the thinking mode must be passed back to the API`。本扩展已把 pi 内部 thinking 块转回顶层 `reasoning_content` 字段随历史回传（空字符串也保留，工具调用轮次强制携带）。
-9. **npm 发布与 token 安全**：发布到 npm 需要账号 2FA。建议在 npm 网页生成 granular access token 并勾选 *Bypass 2FA on publish*，存为环境变量 `NPM_BYPASS_TOKEN`，再写入本地 `~/.npmrc` 的 `_authToken` 供 `npm publish` 使用（免验证码）。**`~/.npmrc` 内含可绕过 2FA 的明文 token，切勿提交到任何仓库或分享给他人**；若将 home 配置纳入 git 管理（dotfiles 仓库），务必先把 `~/.npmrc` 加入 `.gitignore`。
+9. **npm 发布与 token 安全**：npm 发布由 `.github/workflows/publish-npm.yml` 负责。请在 GitHub 仓库 Secrets 中配置 `NPM_TOKEN`，使用具有该包发布权限的 Granular Access Token；不要把 token 写入仓库、README 或提交到 `~/.npmrc`。若必须本地发布，请使用临时环境变量，并在完成后撤销或轮换 token。
 10. **package.json 的 UTF-8 BOM（1.0.2 已修复）**：1.0.0/1.0.1 发布到 npm 的 `package.json` 首行带 UTF-8 BOM。pi 的 `readPiManifest` 用裸 `JSON.parse` 解析该文件，BOM 会令解析抛错并被静默忽略，导致整个扩展不加载（`/model` 里看不到 `opencode-zen`/`sensenova` 等任何 provider）。1.0.2 起已去掉 BOM；若 `pi install` 后看不到 provider，请 `pi update --extensions` 确认装的是 1.0.2+。pi 侧的健壮性问题已提交：[earendil-works/pi#8310](https://github.com/earendil-works/pi/issues/8310)。
 11. **无需手动配置 auth.json（1.0.4 起）**：旧版要求 `~/.pi/agent/auth.json` 中为每个 provider 添加 `{ "type": "api_key", "key": "public" }` 条目，否则 pi 找不到 key 会直接跳过扩展（报 `No API key found for <provider>`）。1.0.4 起每个 provider 自注册 `apiKey: "public"`（匿名占位），pi 视其为已配置 key，装完即可见可用；要使用账号 key 直接用环境变量即可。重装插件后无需再改 auth.json。
 
