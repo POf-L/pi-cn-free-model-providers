@@ -1,15 +1,9 @@
 name: Publish npm package
 
 on:
-  release:
-    types: [published]
-  workflow_dispatch:
-    inputs:
-      dist_tag:
-        description: "npm dist-tag"
-        required: true
-        default: latest
-        type: string
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: read
@@ -38,18 +32,8 @@ jobs:
           node --check pi-cn-free-model-providers-ext.mjs
           npm pack --dry-run
 
+      - name: Enable npm Trusted Publisher support
+        run: npm install --global npm@latest
+
       - name: Publish to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          DIST_TAG: ${{ inputs.dist_tag || '' }}
-        run: |
-          set -euo pipefail
-          if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "::error::Repository secret NPM_TOKEN is not configured"
-            exit 1
-          fi
-          if [ -n "$DIST_TAG" ]; then
-            npm publish --access public --provenance --tag "$DIST_TAG"
-          else
-            npm publish --access public --provenance
-          fi
+        run: npm publish --access public --provenance
