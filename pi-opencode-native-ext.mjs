@@ -326,7 +326,8 @@ async function saveNativeImage(image, modelId) {
   if (!existsSync(directory)) mkdirSync(directory, { recursive: true });
   const mimeType = image?.mime_type ?? image?.mimeType ?? "image/png";
   const extension = mimeType.includes("jpeg") ? "jpg" : mimeType.includes("webp") ? "webp" : "png";
-  const path = join(directory, `opencode-${modelId}-${Date.now()}.${extension}`);
+  const safeModelId = String(modelId).replaceAll("/", "_");
+  const path = join(directory, `opencode-${safeModelId}-${Date.now()}.${extension}`);
   if (image?.b64_json) {
     writeFileSync(path, Buffer.from(image.b64_json, "base64"));
   } else if (image?.url) {
@@ -337,6 +338,51 @@ async function saveNativeImage(image, modelId) {
     throw new Error("Image API returned neither url nor b64_json");
   }
   return { path, mimeType };
+}
+
+async function saveNativeAudio(bytes, modelId, extension = "mp3") {
+  const directory = join(process.cwd(), ".pi", "generated-audio");
+  if (!existsSync(directory)) mkdirSync(directory, { recursive: true });
+  const path = join(directory, `opencode-${modelId.replaceAll("/", "_")}-${Date.now()}.${extension}`);
+  writeFileSync(path, Buffer.from(bytes));
+  return path;
+}
+
+function streamNativeAudio(model, context, options) {
+  const stream = new AssistantMessageEventStream();
+  const output = makeOutput(model);
+  (async () => {
+    try {
+      stream.push({ type: "start", partial: output });
+      const prompt = latestImageRequest(context).prompt;
+      if (!prompt) throw new Error("TTS requires text input");
+      const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+      const apiKey = process.env.CLOUDFLARE_API_KEY;
+      if (!accountId || !apiKey) throw new Error("CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_KEY are required for TTS");
+      const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model.id}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ text: prompt }),
+        signal: options?.signal,
+      });
+      if (!response.ok) throw new Error(`Cloudflare TTS HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
+      const path = await saveNativeAudio(await response.arrayBuffer(), model.id, "mp3");
+      const text = `Generated audio saved to: ${path}`;
+      output.content.push({ type: "text", text });
+      stream.push({ type: "text_start", contentIndex: 0, partial: output });
+      stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: output });
+      stream.push({ type: "text_end", contentIndex: 0, content: text, partial: output });
+      output.stopReason = "stop";
+      stream.push({ type: "done", reason: "stop", message: output });
+      stream.end();
+    } catch (error) {
+      output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+      output.errorMessage = error instanceof Error ? error.message : String(error);
+      stream.push({ type: "error", reason: "error", error: output });
+      stream.end();
+    }
+  })();
+  return stream;
 }
 
 async function saveNativeVideo(url, modelId) {
@@ -430,16 +476,46 @@ function streamNativeImage(model, context, options) {
       const { prompt, images } = latestImageRequest(context);
       if (!prompt) throw new Error("Image generation requires a text prompt");
       const isSenseNova = model.opencodeImageProvider === "sensenova";
+      const isSiliconFlow = model.opencodeImageProvider === "siliconflow";
       const isAgnesCN = model.opencodeImageProvider === "agnes-cn";
+      const isCloudflare = model.opencodeImageProvider === "cloudflare";
+      if (isCloudflare) {
+        const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+        const apiKey = process.env.CLOUDFLARE_API_KEY;
+        if (!accountId || !apiKey) throw new Error("CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_KEY are required for image generation");
+        const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model.id}`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt }),
+          signal: options?.signal,
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload?.errors?.[0]?.message ?? `Cloudflare image API HTTP ${response.status}`);
+        const saved = await saveNativeImage({ b64_json: payload?.result?.image, mime_type: "image/jpeg" }, model.id);
+        const text = `Generated image saved to: ${saved.path}`;
+        output.content.push({ type: "text", text });
+        stream.push({ type: "text_start", contentIndex: 0, partial: output });
+        stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: output });
+        stream.push({ type: "text_end", contentIndex: 0, content: text, partial: output });
+        appendNativeImage?.(saved);
+        output.stopReason = "stop";
+        stream.push({ type: "done", reason: "stop", message: output });
+        stream.end();
+        return;
+      }
       const baseUrl = isSenseNova
         ? "https://token.sensenova.cn/v1"
-        : isAgnesCN
-          ? "https://api.agnes-ai.cn/v1"
-          : "https://apihub.agnes-ai.com/v1";
-      const envKey = isSenseNova ? "SENSENOVA_API_KEY" : isAgnesCN ? "AGNES_CN_API_KEY" : "AGNES_API_KEY";
+        : isSiliconFlow
+          ? "https://api.siliconflow.cn/v1"
+          : isAgnesCN
+            ? "https://api.agnes-ai.cn/v1"
+            : "https://apihub.agnes-ai.com/v1";
+      const envKey = isSenseNova ? "SENSENOVA_API_KEY" : isSiliconFlow ? "SILICONFLOW_API_KEY" : isAgnesCN ? "AGNES_CN_API_KEY" : "AGNES_API_KEY";
       const endpoint = isSenseNova && images.length ? `${baseUrl}/images/edits` : `${baseUrl}/images/generations`;
-      const body = isSenseNova
-        ? {
+      const body = isSiliconFlow
+        ? { model: model.id, prompt, n: 1, response_format: "url" }
+        : isSenseNova
+          ? {
             model: model.id,
             prompt,
             n: 1,
@@ -571,7 +647,9 @@ const streamSenseNova = (model, context, options) =>
   model.opencodeImageModel ? streamNativeImage(model, context, options) : streamSenseNovaChat(model, context, options);
 
 // Standard OpenAI-compatible providers
-const streamSiliconFlow = makeOpenAIStream("https://api.siliconflow.cn/v1", "SILICONFLOW_API_KEY");
+const streamSiliconFlowChat = makeOpenAIStream("https://api.siliconflow.cn/v1", "SILICONFLOW_API_KEY");
+const streamSiliconFlow = (model, context, options) =>
+  model.opencodeImageModel ? streamNativeImage(model, context, options) : streamSiliconFlowChat(model, context, options);
 const streamModelScope = makeOpenAIStream("https://api-inference.modelscope.cn/v1", "MODELSCOPE_API_KEY", {
   maxTokens: 65536,
 });
@@ -611,6 +689,8 @@ const streamAgnesCN = (model, context, options) =>
 // (deepseek-v4-flash/pro, glm-5.2, kimi-k2.6/k2.7-code) require paid billing
 // and are intentionally NOT registered here.
 const streamCloudflare = (model, context, options) => {
+  if (model.opencodeImageModel) return streamNativeImage(model, context, options);
+  if (model.opencodeAudioModel) return streamNativeAudio(model, context, options);
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
   if (!accountId) {
     const stream = new AssistantMessageEventStream();
@@ -995,6 +1075,17 @@ const SILICONFLOW_MODELS = [
     contextWindow: 262144,
     maxTokens: 65536,
   },
+  {
+    id: "Tongyi-MAI/Z-Image-Turbo",
+    name: "Z-Image Turbo (SiliconFlow image)",
+    api: "openai-completions",
+    input: ["text"],
+    opencodeImageModel: true,
+    opencodeImageProvider: "siliconflow",
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 4096,
+  },
 ];
 const MODELSCOPE_MODELS = [
   {
@@ -1164,6 +1255,28 @@ const CLOUDFLARE_MODELS = [
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 80000,
     maxTokens: 65536,
+  },
+  {
+    id: "@cf/black-forest-labs/flux-1-schnell",
+    name: "FLUX.1 Schnell (via Cloudflare image)",
+    api: "openai-completions",
+    input: ["text"],
+    opencodeImageModel: true,
+    opencodeImageProvider: "cloudflare",
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 4096,
+  },
+  {
+    id: "@cf/deepgram/aura-2-en",
+    name: "Deepgram Aura 2 English (via Cloudflare TTS)",
+    api: "openai-completions",
+    input: ["text"],
+    opencodeAudioModel: true,
+    opencodeAudioProvider: "cloudflare",
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 4096,
   },
 ];
 

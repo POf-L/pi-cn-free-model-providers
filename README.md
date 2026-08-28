@@ -177,6 +177,9 @@ pi -p --provider siliconflow --model siliconflow/Qwen/Qwen3-8B "你好"
 | `THUDM/GLM-Z1-9B-0414` | GLM-Z1 9B 推理 | 128K | 免费 |
 | `THUDM/GLM-4-9B-0414` | GLM-4 9B 通用 | 32K | 免费 |
 | `Qwen/Qwen3.5-4B` | Qwen3.5 4B 轻量长上下文 | 256K | 免费 |
+| `Tongyi-MAI/Z-Image-Turbo` | 文生图模型 | — | `/v1/images/generations` |
+
+> `Tongyi-MAI/Z-Image-Turbo` 已通过 SiliconFlow 图像端点验证并接入；CosyVoice TTS 需要 voice/reference 参数，暂未猜测并开放。
 
 > 其余仍有免费的类别：向量 `BAAI/bge-m3` 等、重排序 `bge-reranker-v2-m3`、ASR `SenseVoiceSmall`/`TeleSpeechASR`、生图 `Kolors`（均非编码对话用途）。原免费标杆 `Qwen2.5-7B-Instruct` 已收费；`glm-4-9b-chat`、`Qwen2-7B-Instruct`、`DeepSeek-R1-Distill-Qwen-7B`、`bce` 向量/重排序等已下线。
 
@@ -256,6 +259,15 @@ pi -p --provider agnes-cn --model agnes-cn/agnes-2.5-pro "你好"
 > 🔭 **变动监听**：`.github/workflows/agnes-watch.yml` 每周巡检（04:35 UTC）：单模型文档页缺失＝疑似下线/改名；Flash 系文档「当前价格」非 $0＝限时免费撤销（最大风险）；参数指纹基线比对捕获原位升级/计费调整；`llms.txt` 全目录扫描发现新版本提示评估收录。全程匿名无需密钥。
 
 ### Cloudflare Workers AI
+
+当前目录已接入两个经过真实请求验证的非文本模型：
+
+| 模型 ID | 能力 | 路由 |
+|---|---|---|
+| `@cf/black-forest-labs/flux-1-schnell` | 图像生成 | `ai/run/{model}` |
+| `@cf/deepgram/aura-2-en` | TTS | `ai/run/{model}` |
+
+图像结果保存到 `.pi/generated-images/`，TTS 结果保存到 `.pi/generated-audio/`。Cloudflare 的 ASR 模型目录和 endpoint 已发现，但音频输入 schema 尚未确认，因此暂不注册 ASR 模型。
 
 Cloudflare 官方托管推理平台，走 **OpenAI 兼容端点**（`https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1`）。注意它**没有免费模型清单**：全平台共享每天 **10,000 Neurons** 的免费算力（UTC 0 点重置），而每个模型的单价差异极大（输出单价最高与最低相差约 16 倍）——大模型重活一天可能只够几轮。定位建议：轻量问答 / 兜底备用，不适合当主力；下表给出逐模型换算。
 
