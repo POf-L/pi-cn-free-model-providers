@@ -46,9 +46,11 @@ pi install https://github.com/pgciq/pi-cn-free-model-providers
 
 > 扩展始终优先以 `pi-cn-free-model-providers-ext.mjs` 为入口文件（仓库根目录），`pi install` 会自动识别；若需指定分支可追加 `#master`。
 
-### 方式三：npm（发布后）
+### 方式三：npm
 
-npm 包名为 `pi-cn-free-model-providers`（发布后安装）：
+npm 包已发布：<https://www.npmjs.com/package/pi-cn-free-model-providers>
+
+当前版本：`1.0.17`。安装命令：
 
 ```bash
 pi install npm:pi-cn-free-model-providers
@@ -61,16 +63,16 @@ pi install npm:pi-cn-free-model-providers
 发布流程采用 `v*` Git tag 触发：
 
 ```bash
-# 先递增 package.json 的 version，例如改为 1.0.17
-npm version 1.0.17 --no-git-tag-version
+# 下一版本示例：先递增 package.json 的 version，例如改为 1.0.18
+npm version 1.0.18 --no-git-tag-version
 git add package.json
-git commit -m "chore: bump version to 1.0.17"
+git commit -m "chore: bump version to 1.0.18"
 git push origin master
-git tag v1.0.17
-git push origin v1.0.17
+git tag v1.0.18
+git push origin v1.0.18
 ```
 
-推送 `v1.0.17` 后，GitHub Actions 会自动校验包名、入口文件和 npm 打包内容，并使用 OIDC + `--provenance` 发布公开包。npm Trusted Publisher 配置中的仓库、workflow 文件名必须与当前项目一致：
+推送新的 `v*` 标签后，GitHub Actions 会自动校验包名、入口文件和 npm 打包内容，并使用 OIDC + `--provenance` 发布公开包。npm Trusted Publisher 配置中的仓库、workflow 文件名必须与当前项目一致：
 
 ```text
 Repository: pgciq/pi-cn-free-model-providers
