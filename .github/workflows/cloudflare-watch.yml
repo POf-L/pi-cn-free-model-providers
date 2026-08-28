@@ -38,7 +38,7 @@ jobs:
           grep -o '@cf/[A-Za-z0-9._/-]*' /tmp/catalog.html \
             | sed -E 's|[/._-]+$||' | sort -u > /tmp/live.txt
           echo "官方目录 $(wc -l < /tmp/live.txt) 个模型"
-          awk '/^const CLOUDFLARE_MODELS/,/^\];/' pi-opencode-native-ext.mjs \
+          awk '/^const CLOUDFLARE_MODELS/,/^\];/' pi-cn-free-model-providers-ext.mjs \
             | grep -o 'id: "[^"]*"' | cut -d'"' -f2 > /tmp/curated.txt
           echo "在册模型 $(wc -l < /tmp/curated.txt) 个:"
           cat /tmp/curated.txt
@@ -122,7 +122,7 @@ jobs:
             echo "- 官方目录: https://developers.cloudflare.com/workers-ai/models/"
             echo "- 定价页: https://developers.cloudflare.com/workers-ai/platform/pricing/"
             echo "- 平台变更公告: https://developers.cloudflare.com/changelog/"
-            echo "- 更新位置: CLOUDFLARE_MODELS（pi-opencode-native-ext.mjs）、README Cloudflare 小节对应表格与兼容性矩阵"
+            echo "- 更新位置: CLOUDFLARE_MODELS（pi-cn-free-model-providers-ext.mjs）、README Cloudflare 小节对应表格与兼容性矩阵"
           } > /tmp/body.md
           gh issue create --title "⚠️ Cloudflare 模型目录变动 ($(date +%F))" --body-file /tmp/body.md
 

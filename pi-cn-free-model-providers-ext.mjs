@@ -1526,7 +1526,7 @@ function registerAll(pi, m) {
   for (const key of Object.keys(m)) {
     if (Array.isArray(m[key])) m[key] = m[key].map(withCapabilities);
   }
-  pi.registerProvider("opencode-fix", {
+  pi.registerProvider("opencode-zen", {
     name: "OpenCode Zen (native headers)",
     apiKey: "public",
     baseUrl: "https://opencode.ai/zen/v1",
@@ -1593,11 +1593,11 @@ function registerAll(pi, m) {
 }
 
 // ---------------------------------------------------------------------------
-// /opencode-capabilities — per-model capability table across all providers
+// /model-capabilities — per-model capability table across all providers
 // ---------------------------------------------------------------------------
 
 const OPENCODE_PROVIDER_IDS = [
-  "opencode-fix",
+  "opencode-zen",
   "sensenova",
   "siliconflow",
   "modelscope",
@@ -1610,7 +1610,7 @@ const OPENCODE_PROVIDER_IDS = [
 const OPENCODE_SESSION_USAGE = new Map();
 let opencodeUsageHookInstalled = false;
 
-function showOpenCodeMarkdown(pi, ctx, key, markdown) {
+function showModelMarkdown(pi, ctx, key, markdown) {
   if (ctx.mode === "tui") pi.appendEntry(key, { markdown });
   else if (ctx.hasUI) ctx.ui.notify(markdown, "info");
   else console.log(markdown);
@@ -1623,11 +1623,11 @@ function formatPrice(value) {
 }
 
 function registerPricesCommand(pi) {
-  pi.registerCommand("opencode-prices", {
-    description: "List OpenCode-native model catalog prices per 1M tokens; optional provider filter",
+  pi.registerCommand("model-prices", {
+    description: "List model catalog prices per 1M tokens; optional provider filter",
     handler: async (args, ctx) => {
       const provider = (args || "").trim().split(/\\s+/).find((token) => OPENCODE_PROVIDER_IDS.includes(token));
-      const models = (pi.modelRegistry?.getAvailable?.() ?? []).filter((model) =>
+      const models = (ctx.modelRegistry?.getAvailable?.() ?? []).filter((model) =>
         OPENCODE_PROVIDER_IDS.includes(model.provider) && (!provider || model.provider === provider),
       );
       const rows = models.sort((a, b) => a.provider === b.provider ? a.id.localeCompare(b.id) : a.provider.localeCompare(b.provider)).map((model) => ({
@@ -1639,7 +1639,7 @@ function registerPricesCommand(pi) {
         context: model.contextWindow ?? 0,
       }));
       const markdown = [
-        `# OpenCode-native model prices${provider ? ` (${provider})` : ""}`,
+        `# Model catalog prices${provider ? ` (${provider})` : ""}`,
         "",
         "_Catalog values are USD per 1M tokens. Zero means the curated catalog marks the model free; `—` means no price metadata._",
         "",
@@ -1649,10 +1649,10 @@ function registerPricesCommand(pi) {
         "",
         rows.length ? "" : "_No registered models match the filter._",
       ].join("\n");
-      showOpenCodeMarkdown(pi, ctx, "opencode-prices", markdown);
+      showModelMarkdown(pi, ctx, "model-prices", markdown);
     },
   });
-  pi.registerEntryRenderer("opencode-prices", (entry) => new Markdown(entry.data.markdown, 1, 0, getMarkdownTheme()));
+  pi.registerEntryRenderer("model-prices", (entry) => new Markdown(entry.data.markdown, 1, 0, getMarkdownTheme()));
 }
 
 function installUsageTracker(pi) {
@@ -1678,13 +1678,13 @@ function installUsageTracker(pi) {
 }
 
 function registerUsageCommand(pi) {
-  pi.registerCommand("opencode-usage", {
-    description: "Show OpenCode-native token/cost usage accumulated in the current Pi process",
+  pi.registerCommand("model-usage", {
+    description: "Show model token/cost usage accumulated in the current Pi process",
     handler: async (_args, ctx) => {
       const rows = [...OPENCODE_SESSION_USAGE.values()].sort((a, b) => a.provider === b.provider ? a.model.localeCompare(b.model) : a.provider.localeCompare(b.provider));
       const total = rows.reduce((sum, row) => sum + row.cost, 0);
       const markdown = [
-        "# OpenCode-native session usage",
+        "# Model session usage",
         "",
         "_This is process/session usage from assistant messages, not a provider billing dashboard. Provider billing APIs are not uniform._",
         "",
@@ -1694,10 +1694,10 @@ function registerUsageCommand(pi) {
         "",
         rows.length ? `**Session total:** $${total.toFixed(6)}` : "_No assistant usage recorded in this Pi process yet._",
       ].join("\n");
-      showOpenCodeMarkdown(pi, ctx, "opencode-usage", markdown);
+      showModelMarkdown(pi, ctx, "model-usage", markdown);
     },
   });
-  pi.registerEntryRenderer("opencode-usage", (entry) => new Markdown(entry.data.markdown, 1, 0, getMarkdownTheme()));
+  pi.registerEntryRenderer("model-usage", (entry) => new Markdown(entry.data.markdown, 1, 0, getMarkdownTheme()));
 }
 
 function registerCapabilitiesCommand(pi) {
@@ -1710,13 +1710,13 @@ function registerCapabilitiesCommand(pi) {
     tools: "tools",
   };
 
-  pi.registerCommand("opencode-capabilities", {
+  pi.registerCommand("model-capabilities", {
     description:
-      "List OpenCode-native model capabilities (vision/image/video/audio/tools/reasoning) across all providers; e.g. /opencode-capabilities vision",
+      "List model capabilities (vision/image/video/audio/tools/reasoning) across all providers; e.g. /model-capabilities vision",
     handler: async (args, ctx) => {
       const tokens = (args || "").trim().split(/\s+/).filter(Boolean);
       const filter = tokens.find((token) => token in flags);
-      const models = (pi.modelRegistry?.getAvailable?.() ?? []).filter((m) =>
+      const models = (ctx.modelRegistry?.getAvailable?.() ?? []).filter((m) =>
         OPENCODE_PROVIDER_IDS.includes(m.provider),
       );
 
@@ -1740,7 +1740,7 @@ function registerCapabilitiesCommand(pi) {
         );
 
       const markdown = [
-        `# OpenCode-native model capabilities${filter ? ` (filter: ${filter})` : ""}`,
+        `# Model capabilities${filter ? ` (filter: ${filter})` : ""}`,
         "",
         "| Provider | Model | Reasoning | Vision | Image | Video | Audio | Tools |",
         "|---|---|:---:|:---:|:---:|:---:|:---:|:---:|",
@@ -1753,7 +1753,7 @@ function registerCapabilitiesCommand(pi) {
       ].join("\n");
 
       if (ctx.mode === "tui") {
-        pi.appendEntry("opencode-capabilities", { markdown });
+        pi.appendEntry("model-capabilities", { markdown });
       } else if (ctx.hasUI) {
         ctx.ui.notify(markdown, "info");
       } else {
@@ -1762,7 +1762,7 @@ function registerCapabilitiesCommand(pi) {
     },
   });
 
-  pi.registerEntryRenderer("opencode-capabilities", (entry) => {
+  pi.registerEntryRenderer("model-capabilities", (entry) => {
     const mdTheme = getMarkdownTheme();
     return new Markdown(entry.data.markdown, 1, 0, mdTheme);
   });

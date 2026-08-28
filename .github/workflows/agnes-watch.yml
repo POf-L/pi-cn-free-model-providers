@@ -34,7 +34,7 @@ jobs:
 
       - name: Extract curated agnes model ids
         run: |
-          awk '/^const AGNES_MODELS/,/^\];/' pi-opencode-native-ext.mjs \
+          awk '/^const AGNES_MODELS/,/^\];/' pi-cn-free-model-providers-ext.mjs \
             | grep -o 'id: "[^"]*"' | cut -d'"' -f2 > /tmp/curated.txt
           echo "在册模型 $(wc -l < /tmp/curated.txt) 个:"
           cat /tmp/curated.txt
@@ -146,7 +146,7 @@ jobs:
             printf -- '- 价格信号源: 各模型文档页 .md 的「限制与价格 / 当前价格」（$0 即免费有效）\n'
             printf -- '- 配额参考: https://www.agnes-ai.com/zh-Hans/docs/tokenplan\n'
             printf -- '- 全目录索引: https://wiki.agnes-ai.com/llms.txt\n'
-            printf -- '- 更新位置: `AGNES_MODELS`（pi-opencode-native-ext.mjs）、README Agnes 小节、模型对比表、场景矩阵\n'
+            printf -- '- 更新位置: `AGNES_MODELS`（pi-cn-free-model-providers-ext.mjs）、README Agnes 小节、模型对比表、场景矩阵\n'
           } > /tmp/body.md
           gh issue create \
             --title "⚠️ Agnes 在册模型巡检异常 ($(date +%F))" \

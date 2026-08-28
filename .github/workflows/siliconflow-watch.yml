@@ -28,7 +28,7 @@ jobs:
 
       - name: Extract curated siliconflow model ids
         run: |
-          awk '/^const SILICONFLOW_MODELS/,/^\];/' pi-opencode-native-ext.mjs \
+          awk '/^const SILICONFLOW_MODELS/,/^\];/' pi-cn-free-model-providers-ext.mjs \
             | grep -o 'id: "[^"]*"' | cut -d'"' -f2 > /tmp/curated.txt
           echo "在册模型 $(wc -l < /tmp/curated.txt) 个:"
           cat /tmp/curated.txt
@@ -58,7 +58,7 @@ jobs:
           {
             printf '官方更新公告命中本扩展在册的硅基流动模型，请核验免费标注是否失效。\n\n'
             printf '```\n%s\n```\n\n' "$(cat /tmp/hits.txt)"
-            printf '参考：\n- 公告原文: https://docs.siliconflow.cn/cn/release-notes/overview\n- 核验方法: 模型广场 biz_info 计价接口逐个比对（所有计价项为 ¥0 才算免费），并与 `/v1/models` 在架列表取交集\n- 更新位置: `SILICONFLOW_MODELS`（pi-opencode-native-ext.mjs）、README 对应表格与推荐组合\n'
+            printf '参考：\n- 公告原文: https://docs.siliconflow.cn/cn/release-notes/overview\n- 核验方法: 模型广场 biz_info 计价接口逐个比对（所有计价项为 ¥0 才算免费），并与 `/v1/models` 在架列表取交集\n- 更新位置: `SILICONFLOW_MODELS`（pi-cn-free-model-providers-ext.mjs）、README 对应表格与推荐组合\n'
           } > /tmp/body.md
           gh issue create \
             --title "⚠️ SiliconFlow 公告涉及在册模型，请核验免费标注 ($(date +%F))" \

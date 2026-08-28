@@ -1,6 +1,6 @@
-# pi-opencode-native
+# pi-cn-free-model-providers
 
-让 [pi](https://github.com/Codeks/pi)（AI 编码助手 CLI）通过原生通道调用 **OpenCode Zen 免费模型**（6 个），解决第三方客户端直接调用时遭遇的 **429 FreeUsageLimitError** 限流问题。
+让 [pi](https://github.com/Codeks/pi)（AI 编码助手 CLI）面向中国大陆免费用户，通过原生通道接入多个当前提供免费额度的模型供应商，包括 **OpenCode Zen、SenseNova、SiliconFlow、ModelScope、NVIDIA NIM、Cloudflare 和 Agnes AI**。各平台免费政策可能变化，模型会自动进行实时目录校验。
 
 ## 问题背景
 
@@ -9,7 +9,7 @@ OpenCode Zen 的免费模型由上游 "Console" 推理提供商托管，其**按
 - 请求带 `User-Agent: opencode/...` → 放行（200）
 - 请求带 `curl`、`OpenAI/JS` 等非 opencode UA → 拒绝（429 `FreeUsageLimitError`）
 
-pi 内置的 opencode provider 不使用 opencode UA，因此直接调用免费模型必然 429。本扩展注册了一个**自包含的 provider**（`opencode-fix`），用原生头（`User-Agent: opencode/1.15.5` + `x-opencode-client` + `x-opencode-session/request` ULID ID）发起请求，同时把 pi 内部消息格式正确转换为 OpenAI 兼容格式（`developer`→`system`、thinking 块转回 assistant 消息的 `reasoning_content`、tool 消息转 `role: "tool"` 等）。
+pi 内置的 opencode provider 不使用 opencode UA，因此直接调用免费模型必然 429。本扩展注册了一个**自包含的 provider**（`opencode-zen`），用原生头（`User-Agent: opencode/1.15.5` + `x-opencode-client` + `x-opencode-session/request` ULID ID）发起请求，同时把 pi 内部消息格式正确转换为 OpenAI 兼容格式（`developer`→`system`、thinking 块转回 assistant 消息的 `reasoning_content`、tool 消息转 `role: "tool"` 等）。
 
 **零外部依赖**：不 import pi-ai（pi 是单文件 bun 打包，磁盘上无法解析该模块），自带 SSE 解析与事件流。
 
@@ -31,27 +31,27 @@ pi 内置的 opencode provider 不使用 opencode UA，因此直接调用免费�
 ### 方式一：本地文件
 
 ```bash
-pi install /path/to/pi-opencode-native-ext.mjs
+pi install /path/to/pi-cn-free-model-providers-ext.mjs
 ```
 
 ### 方式二：GitHub（推荐）
 
-仓库已公开：<https://github.com/pgciq/pi-opencode-native>
+仓库已公开：<https://github.com/pgciq/pi-cn-free-model-providers>
 
 ```bash
-pi install git:github.com/pgciq/pi-opencode-native
+pi install git:github.com/pgciq/pi-cn-free-model-providers
 # 或
-pi install https://github.com/pgciq/pi-opencode-native
+pi install https://github.com/pgciq/pi-cn-free-model-providers
 ```
 
-> 扩展始终优先以 `pi-opencode-native-ext.mjs` 为入口文件（仓库根目录），`pi install` 会自动识别；若需指定分支可追加 `#master`。
+> 扩展始终优先以 `pi-cn-free-model-providers-ext.mjs` 为入口文件（仓库根目录），`pi install` 会自动识别；若需指定分支可追加 `#master`。
 
-### 方式三：npm（已发布）
+### 方式三：npm（发布后）
 
-包已发布到 npm：<https://www.npmjs.com/package/pi-opencode-native>
+npm 包名为 `pi-cn-free-model-providers`（发布后安装）：
 
 ```bash
-pi install npm:pi-opencode-native
+pi install npm:pi-cn-free-model-providers
 ```
 
 ## 配置
@@ -72,7 +72,7 @@ export OPENCODE_API_KEY=sk-xxx
 
 # 方式 B（可选）：auth.json 存真实 key
 cat ~/.pi/agent/auth.json
-# { "opencode-fix": { "type": "api_key", "key": "sk-xxx" } }
+# { "opencode-zen": { "type": "api_key", "key": "sk-xxx" } }
 ```
 
 > ⚠️ `auth.json` 条目现在完全可选。若想为某个 provider 存真实 key，写入非 `public` 的值即可（优先级高于匿名兜底、低于环境变量）。Zen 免费模型不写任何 key 也能匿名使用。
@@ -83,7 +83,7 @@ cat ~/.pi/agent/auth.json
 
 ```json
 {
-  "defaultProvider": "opencode-fix",
+  "defaultProvider": "opencode-zen",
   "defaultModel": "hy3-free"
 }
 ```
@@ -98,7 +98,7 @@ pi -p "Reply with exactly OK"
 pi
 
 # 指定模型
-pi --model opencode-fix/hy3-free
+pi --model opencode-zen/hy3-free
 ```
 
 ### 可用免费模型
@@ -611,7 +611,7 @@ TUI 内 `Ctrl+O` 选 provider 后用 `Ctrl+P` 切换模型。
 
 ### 与 pi 扩展的差异
 
-| 维度 | pi 扩展 (`pi-opencode-native`) | opencode 原生 |
+| 维度 | pi 扩展 (`pi-cn-free-model-providers`) | opencode 原生 |
 |---|---|---|
 | 底层 | 自定义 streamSimple + fetch | `@ai-sdk/openai-compatible` |
 | 消息清洗 | 内置 `cleanBody`（合并 system、删 `content: null`） | 无（AI SDK 默认行为） |
@@ -622,7 +622,7 @@ opencode 原生方式不经过 `cleanBody`，但实测标准对话/工具调用�
 
 ## 注意事项
 
-1. **模型歧义**：若机器上也配置了 pi 内置 `opencode` provider 且带 key，裸 `--model hy3-free` 等模型 ID 会报 "ambiguous across providers"。解决：显式 `--provider opencode-fix`，或删除内置 opencode 的 key，或将 defaultProvider 设为 `opencode-fix`。
+1. **模型歧义**：若机器上也配置了 pi 内置 `opencode` provider 且带 key，裸 `--model hy3-free` 等模型 ID 会报 "ambiguous across providers"。解决：显式 `--provider opencode-zen`，或删除内置 opencode 的 key，或将 defaultProvider 设为 `opencode-zen`。
 2. **限流是共享的**：匿名 `public` key 的免费额度是全 Zen 用户共享的（社区实测约 200 请求/天兜底，官方未公布固定配额），到达后返回 429 `FreeUsageLimitError`，需等待重置。人越多额度越紧张。
 3. **UA 门可能变化**：本扩展写死 `User-Agent: opencode/1.15.5`。OpenCode 官方若调整版本号或免费门控策略，免费通道可能失效，需同步更新本文件中的 `OPENCODE_STATIC_HEADERS`。
 4. **数据条款**：免费模型的免费期内，**提交的数据可能被用于改进模型**（官方隐私声明明确例外）。切勿发送敏感/机密内容。`nemotron-*` 为 NVIDIA 试用端点，禁止提交个人或机密数据，会话会被记录。
@@ -631,18 +631,18 @@ opencode 原生方式不经过 `cleanBody`，但实测标准对话/工具调用�
 7. **代理会导致 500**：Zen API 请求**不能走 HTTP 代理**（实测经 v2rayN/Clash 等代理转发返回 500 Internal server error，直连正常）。若系统全局代理已开启（Windows WinINET），node/bun 的 fetch 默认不读系统代理所以不受影响，但请勿为此扩展显式设置 `HTTPS_PROXY`/`HTTP_PROXY` 环境变量指向代理。
 8. **DeepSeek V4 思维模式回传**：`deepseek-v4-flash`（通过 SenseNova 等）思维模式开启时，DeepSeek 要求历史中 assistant 消息（尤其带 `tool_calls` 的轮次）必须回传 `reasoning_content`，缺失即报 `400 The reasoning_content in the thinking mode must be passed back to the API`。本扩展已把 pi 内部 thinking 块转回顶层 `reasoning_content` 字段随历史回传（空字符串也保留，工具调用轮次强制携带）。
 9. **npm 发布与 token 安全**：发布到 npm 需要账号 2FA。建议在 npm 网页生成 granular access token 并勾选 *Bypass 2FA on publish*，存为环境变量 `NPM_BYPASS_TOKEN`，再写入本地 `~/.npmrc` 的 `_authToken` 供 `npm publish` 使用（免验证码）。**`~/.npmrc` 内含可绕过 2FA 的明文 token，切勿提交到任何仓库或分享给他人**；若将 home 配置纳入 git 管理（dotfiles 仓库），务必先把 `~/.npmrc` 加入 `.gitignore`。
-10. **package.json 的 UTF-8 BOM（1.0.2 已修复）**：1.0.0/1.0.1 发布到 npm 的 `package.json` 首行带 UTF-8 BOM。pi 的 `readPiManifest` 用裸 `JSON.parse` 解析该文件，BOM 会令解析抛错并被静默忽略，导致整个扩展不加载（`/model` 里看不到 `opencode-fix`/`sensenova` 等任何 provider）。1.0.2 起已去掉 BOM；若 `pi install` 后看不到 provider，请 `pi update --extensions` 确认装的是 1.0.2+。pi 侧的健壮性问题已提交：[earendil-works/pi#8310](https://github.com/earendil-works/pi/issues/8310)。
+10. **package.json 的 UTF-8 BOM（1.0.2 已修复）**：1.0.0/1.0.1 发布到 npm 的 `package.json` 首行带 UTF-8 BOM。pi 的 `readPiManifest` 用裸 `JSON.parse` 解析该文件，BOM 会令解析抛错并被静默忽略，导致整个扩展不加载（`/model` 里看不到 `opencode-zen`/`sensenova` 等任何 provider）。1.0.2 起已去掉 BOM；若 `pi install` 后看不到 provider，请 `pi update --extensions` 确认装的是 1.0.2+。pi 侧的健壮性问题已提交：[earendil-works/pi#8310](https://github.com/earendil-works/pi/issues/8310)。
 11. **无需手动配置 auth.json（1.0.4 起）**：旧版要求 `~/.pi/agent/auth.json` 中为每个 provider 添加 `{ "type": "api_key", "key": "public" }` 条目，否则 pi 找不到 key 会直接跳过扩展（报 `No API key found for <provider>`）。1.0.4 起每个 provider 自注册 `apiKey: "public"`（匿名占位），pi 视其为已配置 key，装完即可见可用；要使用账号 key 直接用环境变量即可。重装插件后无需再改 auth.json。
 
-12. **免费清单自动去漂移（1.0.6 起）**：启动后会在**后台**拉取各自 provider 的 `/v1/models` 实时列表，与内置白名单做交集，**自动剔除已从免费档下架/改名的模型**（如某模型被移出免费档，下次启动即不再出现，无需等发版）。设计上**只删不增**：因为各 `/v1/models` 端点不返回定价，且付费模型会保留 `-free` 后缀（如已被移出免费档的 `deepseek-v4-flash-free` 仍列在 Zen 端点里），自动新增会把付费模型误当免费暴露。新增免费模型仍需在 `pi-opencode-native-ext.mjs` 的对应白名单里人工添加（并补好 metadata）。拉取失败/超时（8s）时静默回退到内置白名单，注册永不中断；第三方供应商需设置对应 API key 环境变量才会做实时校验，否则直接用内置列表。
+12. **免费清单自动去漂移（1.0.6 起）**：启动后会在**后台**拉取各自 provider 的 `/v1/models` 实时列表，与内置白名单做交集，**自动剔除已从免费档下架/改名的模型**（如某模型被移出免费档，下次启动即不再出现，无需等发版）。设计上**只删不增**：因为各 `/v1/models` 端点不返回定价，且付费模型会保留 `-free` 后缀（如已被移出免费档的 `deepseek-v4-flash-free` 仍列在 Zen 端点里），自动新增会把付费模型误当免费暴露。新增免费模型仍需在 `pi-cn-free-model-providers-ext.mjs` 的对应白名单里人工添加（并补好 metadata）。拉取失败/超时（8s）时静默回退到内置白名单，注册永不中断；第三方供应商需设置对应 API key 环境变量才会做实时校验，否则直接用内置列表。
 
 13. **Zen 免费模型自动发现 + 免费状态复核（1.0.7 起）**：Zen 供应商在启动后会在**后台**对实时列表中的**全部模型逐个发探测请求**（`max_tokens: 1` 的小请求，8 路并发）：匿名 `public` key 能返回 200 即判定免费（付费模型在鉴权阶段就被 401 拒绝，不计费）；若设置了真实 `OPENCODE_API_KEY`，则改用响应中的 `cost` 字段是否为 0 判定。因此：① 不在白名单的新免费模型**无需等插件发版即可直接使用**（自动注册，保守 metadata：上下文 128K / 输出 64K，名称即模型 ID）；② **白名单模型若被官方转为付费，即使仍在 `/v1/models` 里也会被自动剔除**，避免匿名下报错、配了真实 key 时被误扣费。探测结果分三档：`free`（保留/新增）、`paid`（剔除）、`unknown`（网络故障等，一律保留原状，瞬时故障不会清空列表；全部 unknown 时回退到白名单 ∩ 实时列表）。白名单条目始终优先（元数据更精确），想要补全显示名/上下文窗口可在白名单中加正式条目。
 
 ## 命令
 
-- `/opencode-capabilities [image|video|audio|vision|reasoning|tools]` — 列出本扩展注册的全部 provider 下每个模型的能力；已验证的图像/视频/音频模型也会注册并使用原生 endpoint。
-- `/opencode-prices [provider]` — 查询已注册模型的 catalog 定价（USD/1M tokens、上下文窗口）。零值表示 curated catalog 标记为免费；没有真实价格时显示 `—`。
-- `/opencode-usage` — 查询当前 Pi 进程累计的 token/cost 使用量。它是 session usage，不是各 provider 的后台账单；各 provider 没有统一 usage API。
+- `/model-capabilities [image|video|audio|vision|reasoning|tools]` — 列出本扩展注册的全部 provider 下每个模型的能力；已验证的图像/视频/音频模型也会注册并使用原生 endpoint。
+- `/model-prices [provider]` — 查询已注册模型的 catalog 定价（USD/1M tokens、上下文窗口）。零值表示 curated catalog 标记为免费；没有真实价格时显示 `—`。
+- `/model-usage` — 查询当前 Pi 进程累计的 token/cost 使用量。它是 session usage，不是各 provider 的后台账单；各 provider 没有统一 usage API。
 
 ## ModLens 视觉引擎切换
 

@@ -39,7 +39,7 @@ jobs:
 
       - name: Extract curated sensenova model ids
         run: |
-          awk '/^const SENSENOVA_MODELS/,/^];/' pi-opencode-native-ext.mjs \
+          awk '/^const SENSENOVA_MODELS/,/^];/' pi-cn-free-model-providers-ext.mjs \
             | grep -o 'id: "[^"]*"' | cut -d'"' -f2 > /tmp/curated.txt
           echo "在册模型 $(wc -l < /tmp/curated.txt) 个:"
           cat /tmp/curated.txt
@@ -165,7 +165,7 @@ jobs:
             echo "参考："
             echo "- 权威目录: GET https://token.sensenova.cn/v1/models（需鉴权，响应含 pricing 等计费元数据）"
             echo "- 平台文档: https://platform.sensenova.cn/docs（SPA，匿名不可抓取，故本巡检走 API）"
-            echo "- 更新位置: SENSENOVA_MODELS（pi-opencode-native-ext.mjs）、README SenseNova 小节、模型对比表、场景矩阵"
+            echo "- 更新位置: SENSENOVA_MODELS（pi-cn-free-model-providers-ext.mjs）、README SenseNova 小节、模型对比表、场景矩阵"
           } > /tmp/body.md
           gh issue create \
             --title "⚠️ SenseNova 目录巡检异常 ($(date +%F))" \
