@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
-import { Markdown } from "@earendil-works/pi-tui";
+import { Image, Markdown } from "@earendil-works/pi-tui";
 
 // ── Push-based stream (copied from pi-free lib/assistant-message-event-stream.js) ──
 class EventStream {
@@ -303,6 +303,105 @@ function makeOutput(model) {
   };
 }
 
+// ── Verified image-generation models ---------------------------------------
+// Agnes and SenseNova expose OpenAI-compatible image-generation endpoints.
+// Keep this separate from the generic chat stream: their image responses are
+// not chat-completion SSE messages and need to be saved/echoed explicitly.
+let appendNativeImage = null;
+
+function latestImageRequest(context) {
+  const messages = Array.isArray(context?.messages) ? context.messages : [];
+  const user = [...messages].reverse().find((message) => message?.role === "user");
+  if (!user) return { prompt: "", images: [] };
+  if (typeof user.content === "string") return { prompt: user.content, images: [] };
+  const parts = Array.isArray(user.content) ? user.content : [];
+  return {
+    prompt: parts.filter((part) => part?.type === "text").map((part) => part.text ?? "").join("\n"),
+    images: parts.filter((part) => part?.type === "image"),
+  };
+}
+
+async function saveNativeImage(image, modelId) {
+  const directory = join(process.cwd(), ".pi", "generated-images");
+  if (!existsSync(directory)) mkdirSync(directory, { recursive: true });
+  const mimeType = image?.mime_type ?? image?.mimeType ?? "image/png";
+  const extension = mimeType.includes("jpeg") ? "jpg" : mimeType.includes("webp") ? "webp" : "png";
+  const path = join(directory, `opencode-${modelId}-${Date.now()}.${extension}`);
+  if (image?.b64_json) {
+    writeFileSync(path, Buffer.from(image.b64_json, "base64"));
+  } else if (image?.url) {
+    const response = await fetch(image.url);
+    if (!response.ok) throw new Error(`Unable to download generated image: HTTP ${response.status}`);
+    writeFileSync(path, Buffer.from(await response.arrayBuffer()));
+  } else {
+    throw new Error("Image API returned neither url nor b64_json");
+  }
+  return { path, mimeType };
+}
+
+function streamNativeImage(model, context, options) {
+  const stream = new AssistantMessageEventStream();
+  const output = makeOutput(model);
+  (async () => {
+    try {
+      stream.push({ type: "start", partial: output });
+      const { prompt, images } = latestImageRequest(context);
+      if (!prompt) throw new Error("Image generation requires a text prompt");
+      const isSenseNova = model.opencodeImageProvider === "sensenova";
+      const isAgnesCN = model.opencodeImageProvider === "agnes-cn";
+      const baseUrl = isSenseNova
+        ? "https://token.sensenova.cn/v1"
+        : isAgnesCN
+          ? "https://api.agnes-ai.cn/v1"
+          : "https://apihub.agnes-ai.com/v1";
+      const envKey = isSenseNova ? "SENSENOVA_API_KEY" : isAgnesCN ? "AGNES_CN_API_KEY" : "AGNES_API_KEY";
+      const endpoint = isSenseNova && images.length ? `${baseUrl}/images/edits` : `${baseUrl}/images/generations`;
+      const body = isSenseNova
+        ? {
+            model: model.id,
+            prompt,
+            n: 1,
+            response_format: "url",
+            output_format: "png",
+            ...(images.length ? { images: images.map((image) => ({ image_url: `data:${image.mimeType};base64,${image.data}` })) } : {}),
+          }
+        : {
+            model: model.id,
+            prompt,
+            n: 1,
+            extra_body: { response_format: "url" },
+            ...(images.length === 1 ? { image: `data:${images[0].mimeType};base64,${images[0].data}` } : {}),
+          };
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${process.env[envKey] ?? ""}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: options?.signal,
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload?.error?.message ?? `Image API HTTP ${response.status}`);
+      const image = payload?.data?.[0];
+      if (!image) throw new Error("Image API returned no image data");
+      const saved = await saveNativeImage(image, model.id);
+      const text = `Generated image saved to: ${saved.path}`;
+      output.content.push({ type: "text", text });
+      stream.push({ type: "text_start", contentIndex: 0, partial: output });
+      stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: output });
+      stream.push({ type: "text_end", contentIndex: 0, content: text, partial: output });
+      appendNativeImage?.(saved);
+      output.stopReason = "stop";
+      stream.push({ type: "done", reason: "stop", message: output });
+      stream.end();
+    } catch (error) {
+      output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+      output.errorMessage = error instanceof Error ? error.message : String(error);
+      stream.push({ type: "error", reason: output.stopReason, error: output });
+      stream.end();
+    }
+  })();
+  return stream;
+}
+
 // Factory for standard OpenAI-compatible providers (no special headers/schema).
 // opts.maxTokens may be a number (all models) or a function (model) => number
 // to let each model use its own registered limit.
@@ -367,7 +466,7 @@ function streamOpenCode(model, context, options) {
 // https://platform.sensenova.cn/docs — only listed fields are accepted;
 // response_format is rejected, multiple system messages must be merged,
 // assistant.content:null must be dropped, max_tokens <= 65536.
-const streamSenseNova = makeOpenAIStream("https://token.sensenova.cn/v1", "SENSENOVA_API_KEY", {
+const streamSenseNovaChat = makeOpenAIStream("https://token.sensenova.cn/v1", "SENSENOVA_API_KEY", {
   maxTokens: 65536,
   cleanBody: (body) => {
     const msgs = body.messages ?? [];
@@ -386,6 +485,8 @@ const streamSenseNova = makeOpenAIStream("https://token.sensenova.cn/v1", "SENSE
     return { ...body, messages: merged };
   },
 });
+const streamSenseNova = (model, context, options) =>
+  model.opencodeImageModel ? streamNativeImage(model, context, options) : streamSenseNovaChat(model, context, options);
 
 // Standard OpenAI-compatible providers
 const streamSiliconFlow = makeOpenAIStream("https://api.siliconflow.cn/v1", "SILICONFLOW_API_KEY");
@@ -399,14 +500,18 @@ const streamNvidia = makeOpenAIStream("https://integrate.api.nvidia.com/v1", "NV
 // image_url input (base64 data URLs work), tool calling, and thinking mode
 // via chat_template_kwargs.enable_thinking (wired to pi's thinkingLevel).
 // https://www.agnes-ai.com/zh-Hans/docs/overview
-const streamAgnes = makeOpenAIStream("https://apihub.agnes-ai.com/v1", "AGNES_API_KEY", {
+const streamAgnesChat = makeOpenAIStream("https://apihub.agnes-ai.com/v1", "AGNES_API_KEY", {
   maxTokens: 65536,
   enableThinking: true,
 });
-const streamAgnesCN = makeOpenAIStream("https://api.agnes-ai.cn/v1", "AGNES_CN_API_KEY", {
+const streamAgnesCNChat = makeOpenAIStream("https://api.agnes-ai.cn/v1", "AGNES_CN_API_KEY", {
   maxTokens: 65536,
   enableThinking: true,
 });
+const streamAgnes = (model, context, options) =>
+  model.opencodeImageModel ? streamNativeImage(model, context, options) : streamAgnesChat(model, context, options);
+const streamAgnesCN = (model, context, options) =>
+  model.opencodeImageModel ? streamNativeImage(model, context, options) : streamAgnesCNChat(model, context, options);
 
 // Cloudflare Workers AI — official OpenAI-compatible endpoint.
 // https://developers.cloudflare.com/workers-ai/configuration/open-ai-compatibility/
@@ -500,8 +605,8 @@ async function run(stream, output, model, context, options, cfg) {
 }
 
 // ── Agnes AI models (shared by international + China providers) ──
-// Text/chat models only; image/video generation models are not chat
-// completions and are intentionally not registered. Limits from:
+// Chat and verified image-generation models. Image models use the native
+// /v1/images/generations endpoint rather than chat completions. Limits from:
 // https://wiki.agnes-ai.com/en/docs/agnes-25-flash.md (and agnes-20-flash.md)
 const AGNES_MODELS = [
   {
@@ -543,6 +648,28 @@ const AGNES_MODELS = [
     cost: { input: 0.45, output: 0.9, cacheRead: 0.0038, cacheWrite: 0 },
     contextWindow: 1048576,
     maxTokens: 65536,
+  },
+  {
+    id: "agnes-image-2.0-flash",
+    name: "Agnes Image 2.0 Flash",
+    api: "openai-completions",
+    input: ["text"],
+    opencodeImageModel: true,
+    opencodeImageProvider: "agnes",
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 4096,
+  },
+  {
+    id: "agnes-image-2.1-flash",
+    name: "Agnes Image 2.1 Flash",
+    api: "openai-completions",
+    input: ["text"],
+    opencodeImageModel: true,
+    opencodeImageProvider: "agnes",
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 4096,
   },
 ];
 
@@ -666,6 +793,28 @@ const SENSENOVA_MODELS = [
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 1048576,
     maxTokens: 131072,
+  },
+  {
+    id: "sensenova-u1-fast",
+    name: "SenseNova U1 Fast (image generation)",
+    api: "openai-completions",
+    input: ["text"],
+    opencodeImageModel: true,
+    opencodeImageProvider: "sensenova",
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 262144,
+    maxTokens: 4096,
+  },
+  {
+    id: "sensenova-u1.5-lite",
+    name: "SenseNova U1.5 Lite (image generation/editing)",
+    api: "openai-completions",
+    input: ["text", "image"],
+    opencodeImageModel: true,
+    opencodeImageProvider: "sensenova",
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 262144,
+    maxTokens: 4096,
   },
 ];
 // 免费清单 2026-08-22 经模型广场 biz_info 计价接口逐个核验，并与 /v1/models 在架列表取交集。
@@ -1061,26 +1210,36 @@ function initialModels() {
   };
 }
 
-// Derive a capabilities block from a model's existing reasoning/input fields so
-// /opencode-capabilities can report per-model abilities without re-deriving them.
-// OpenCode-native intentionally does not register image/video/audio generation
-// models (they are not chat completions), so those stay false here.
+// Derive a capabilities block from model metadata. Image-generation models
+// carry explicit opencodeImageModel metadata because their upstream endpoint
+// is not chat completions; verified Agnes/SenseNova models use the native
+// image-generation path below. Unknown providers remain conservative.
 function withCapabilities(model) {
   const input = Array.isArray(model.input) ? model.input : ["text"];
   return {
     ...model,
     capabilities: {
-      tools: true,
-      vision: input.includes("image"),
-      image: false,
-      video: false,
-      audio: false,
+      tools: model.tools !== false,
+      vision: input.includes("image") && !model.opencodeImageModel,
+      image: model.opencodeImageModel === true,
+      video: model.opencodeVideoModel === true,
+      audio: model.opencodeAudioModel === true,
       reasoning: !!model.reasoning,
     },
   };
 }
 
 function registerAll(pi, m) {
+  appendNativeImage = (image) => pi.appendEntry("opencode-generated-image", image);
+  pi.registerEntryRenderer("opencode-generated-image", (entry, _options, theme) => {
+    const image = entry.data ?? {};
+    try {
+      const data = readFileSync(image.path).toString("base64");
+      return new Image(data, image.mimeType || "image/png", theme, { maxWidthCells: 80, maxHeightCells: 30 });
+    } catch {
+      return new Markdown(`Generated image unavailable: ${image.path ?? "unknown path"}`, 1, 0, getMarkdownTheme());
+    }
+  });
   // Augment each model with a capabilities block (derived from reasoning/input).
   for (const key of Object.keys(m)) {
     if (Array.isArray(m[key])) m[key] = m[key].map(withCapabilities);
@@ -1215,7 +1374,7 @@ function registerCapabilitiesCommand(pi) {
             `| ${row.provider} | ${row.id} | ${row.reasoning || "—"} | ${row.vision || "—"} | ${row.image || "—"} | ${row.video || "—"} | ${row.audio || "—"} | ${row.tools || "—"} |`,
         ),
         "",
-        "_Capabilities are derived from each curated model's reasoning/input fields. Image/video/audio generation models are not chat completions and are intentionally not registered._",
+        "_Capabilities are derived from each curated model's reasoning/input fields; verified Agnes/SenseNova image models use their native generation endpoints._",
       ].join("\n");
 
       if (ctx.mode === "tui") {

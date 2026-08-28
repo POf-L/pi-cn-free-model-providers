@@ -140,8 +140,10 @@ export SENSENOVA_API_KEY=sk-xxx
 | `sensenova-6.8-flash-lite` | 新一代轻量多模态智能体（文本+图像） | 256K | 1,500 次 / 5h |
 | `deepseek-v4-flash` | DeepSeek 高性能对话（thinking/非 thinking、工具调用） | 1M | 150 次 / 5h |
 | `glm-5.2` | 智谱旗舰长程任务模型（1M 上下文，可完成端到端开发管线） | 1M | 免费套餐可用 |
+| `sensenova-u1-fast` | 图像生成专用模型 | 256K | `/v1/images/generations` |
+| `sensenova-u1.5-lite` | 图像生成/编辑模型 | 256K | `/v1/images/generations`、`/v1/images/edits` |
 
-> `sensenova-u1-fast` 为**图像生成专用**（`output_modalities: image`，走 `/v1/images/generations`），与 chat completions 不兼容，未注册。
+`sensenova-u1-fast` 和 `sensenova-u1.5-lite` 已注册为图像模型，不会误走 chat completions；生成结果保存到 `.pi/generated-images/`，支持终端通过 TUI Image 回显。
 
 > 🔭 **变动监听**：`.github/workflows/sensenova-watch.yml` 每周巡检（04:59 UTC）。平台文档站是 SPA 壳无法匿名抓取，故走带密钥的权威目录 `GET /v1/models`（响应含 pricing 等计费元数据）：在册模型消失＝下线/改名；pricing 非 0＝免费档撤销；新 id 出现＝新模型上线并附计费元数据供评估收录。需配置 secret `SENSENOVA_API_KEY`；基线存 `.github/watch-state/` 由 workflow 自动提交。
 
@@ -243,8 +245,10 @@ pi -p --provider agnes-cn --model agnes-cn/agnes-2.5-pro "你好"
 | `agnes-2.0-flash` | 上一代快速模型（Claw-Eval 排名 #9） | 512K | 免费（限时） |
 | `agnes-2.5-pro` | 付费推理旗舰：高级编码、科学推理、长上下文、agent 终端任务 | 1M | $0.45/M 输入、$0.90/M 输出 |
 | `agnes-2.5-pro-alpha` | 打榜版付费推理模型（同上基准参考） | 1M | $0.45/M 输入、$0.90/M 输出 |
+| `agnes-image-2.0-flash` | 图像生成专用模型 | — | `/v1/images/generations` |
+| `agnes-image-2.1-flash` | 图像生成专用模型 | — | `/v1/images/generations` |
 
-> 图像/视频**生成**模型（`agnes-image-*`、`agnes-video-*`）与 chat completions 不兼容，未注册。
+> `agnes-image-2.0-flash` 和 `agnes-image-2.1-flash` 已注册为图像模型，使用 `/v1/images/generations` 并通过 TUI Image 回显；视频模型仍未接入本目录。
 
 > 🔭 **变动监听**：`.github/workflows/agnes-watch.yml` 每周巡检（04:35 UTC）：单模型文档页缺失＝疑似下线/改名；Flash 系文档「当前价格」非 $0＝限时免费撤销（最大风险）；参数指纹基线比对捕获原位升级/计费调整；`llms.txt` 全目录扫描发现新版本提示评估收录。全程匿名无需密钥。
 
@@ -621,7 +625,7 @@ opencode 原生方式不经过 `cleanBody`，但实测标准对话/工具调用�
 
 ## 命令
 
-- `/opencode-capabilities [image|video|audio|vision|reasoning|tools]` — 列出本扩展注册的全部 provider（`opencode-fix` / `sensenova` / `siliconflow` / `modelscope` / `nvidia` / `cloudflare` / `agnes` / `agnes-cn`）下每个模型的能力（vision / image / video / audio / tools / reasoning），可选过滤参数只看某类能力。能力由每个精选模型的 `reasoning` / `input` 字段推导；图像/视频/音频生成类模型不是 chat completions，按设计不注册。
+- `/opencode-capabilities [image|video|audio|vision|reasoning|tools]` — 列出本扩展注册的全部 provider（`opencode-fix` / `sensenova` / `siliconflow` / `modelscope` / `nvidia` / `cloudflare` / `agnes` / `agnes-cn`）下每个模型的能力。能力由模型的 `reasoning` / `input` / 已验证的图像元数据推导；已验证的 Agnes/SenseNova 图像生成模型也会注册并使用原生 image endpoint。
 
 ## ModLens 视觉引擎切换
 
