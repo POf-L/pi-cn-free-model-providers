@@ -122,7 +122,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          : > /tmp/discovered.txt
           gone=$(grep -c . /tmp/gone.txt 2>/dev/null || true)
           bad=$(grep -c . /tmp/unhealthy.txt 2>/dev/null || true)
           disc=$(grep -c . /tmp/discovered.txt 2>/dev/null || true)
