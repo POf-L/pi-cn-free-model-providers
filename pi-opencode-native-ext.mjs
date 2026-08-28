@@ -339,6 +339,88 @@ async function saveNativeImage(image, modelId) {
   return { path, mimeType };
 }
 
+async function saveNativeVideo(url, modelId) {
+  const directory = join(process.cwd(), ".pi", "generated-videos");
+  if (!existsSync(directory)) mkdirSync(directory, { recursive: true });
+  const path = join(directory, `opencode-${modelId}-${Date.now()}.mp4`);
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Unable to download generated video: HTTP ${response.status}`);
+  writeFileSync(path, Buffer.from(await response.arrayBuffer()));
+  return path;
+}
+
+async function waitForNativeVideo(baseUrl, videoId, apiKey, signal) {
+  const deadline = Date.now() + 30 * 60 * 1000;
+  const apiRoot = baseUrl.replace(/\/v1\/?$/, "");
+  while (Date.now() < deadline) {
+    if (signal?.aborted) throw new Error("Video generation aborted");
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(resolve, 5000);
+      signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("Video generation aborted")); }, { once: true });
+    });
+    const response = await fetch(`${apiRoot}/agnesapi?video_id=${encodeURIComponent(videoId)}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal,
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload?.error?.message ?? `Video status HTTP ${response.status}`);
+    if (payload.status === "completed") return payload;
+    if (payload.status === "failed") throw new Error(payload?.error?.message ?? "Video generation failed");
+  }
+  throw new Error("Video generation timed out after 30 minutes");
+}
+
+function streamNativeVideo(model, context, options) {
+  const stream = new AssistantMessageEventStream();
+  const output = makeOutput(model);
+  (async () => {
+    try {
+      stream.push({ type: "start", partial: output });
+      const { prompt, images } = latestImageRequest(context);
+      if (!prompt) throw new Error("Video generation requires a text prompt");
+      const isCN = model.opencodeImageProvider === "agnes-cn";
+      const baseUrl = isCN ? "https://api.agnes-ai.cn/v1" : "https://apihub.agnes-ai.com/v1";
+      const envKey = isCN ? "AGNES_CN_API_KEY" : "AGNES_API_KEY";
+      const body = {
+        model: model.id,
+        prompt,
+        ...(images.length === 1 ? { image: `data:${images[0].mimeType};base64,${images[0].data}` } : {}),
+        ...(images.length > 1 ? { extra_body: { image: images.map((image) => `data:${image.mimeType};base64,${image.data}`), mode: "keyframes" } } : {}),
+        num_frames: 121,
+        frame_rate: 24,
+      };
+      const response = await fetch(`${baseUrl}/videos`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${process.env[envKey] ?? ""}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: options?.signal,
+      });
+      const task = await response.json();
+      if (!response.ok) throw new Error(task?.error?.message ?? `Video API HTTP ${response.status}`);
+      const videoId = task.video_id ?? task.id ?? task.task_id;
+      if (!videoId) throw new Error("Video API returned no video_id");
+      const result = task.status === "completed" ? task : await waitForNativeVideo(baseUrl, videoId, process.env[envKey] ?? "", options?.signal);
+      const url = result?.metadata?.url;
+      if (!url) throw new Error("Video API returned no metadata.url");
+      const path = await saveNativeVideo(url, model.id);
+      const text = `Generated video saved to: ${path}\n\nVideo URL: ${url}`;
+      output.content.push({ type: "text", text });
+      stream.push({ type: "text_start", contentIndex: 0, partial: output });
+      stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: output });
+      stream.push({ type: "text_end", contentIndex: 0, content: text, partial: output });
+      output.stopReason = "stop";
+      stream.push({ type: "done", reason: "stop", message: output });
+      stream.end();
+    } catch (error) {
+      output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+      output.errorMessage = error instanceof Error ? error.message : String(error);
+      stream.push({ type: "error", reason: output.stopReason, error: output });
+      stream.end();
+    }
+  })();
+  return stream;
+}
+
 function streamNativeImage(model, context, options) {
   const stream = new AssistantMessageEventStream();
   const output = makeOutput(model);
@@ -509,9 +591,17 @@ const streamAgnesCNChat = makeOpenAIStream("https://api.agnes-ai.cn/v1", "AGNES_
   enableThinking: true,
 });
 const streamAgnes = (model, context, options) =>
-  model.opencodeImageModel ? streamNativeImage(model, context, options) : streamAgnesChat(model, context, options);
+  model.opencodeVideoModel
+    ? streamNativeVideo(model, context, options)
+    : model.opencodeImageModel
+      ? streamNativeImage(model, context, options)
+      : streamAgnesChat(model, context, options);
 const streamAgnesCN = (model, context, options) =>
-  model.opencodeImageModel ? streamNativeImage(model, context, options) : streamAgnesCNChat(model, context, options);
+  model.opencodeVideoModel
+    ? streamNativeVideo(model, context, options)
+    : model.opencodeImageModel
+      ? streamNativeImage(model, context, options)
+      : streamAgnesCNChat(model, context, options);
 
 // Cloudflare Workers AI — official OpenAI-compatible endpoint.
 // https://developers.cloudflare.com/workers-ai/configuration/open-ai-compatibility/
@@ -666,6 +756,39 @@ const AGNES_MODELS = [
     api: "openai-completions",
     input: ["text"],
     opencodeImageModel: true,
+    opencodeImageProvider: "agnes",
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 4096,
+  },
+  {
+    id: "agnes-video-v2.0",
+    name: "Agnes Video V2.0",
+    api: "openai-completions",
+    input: ["text"],
+    opencodeVideoModel: true,
+    opencodeImageProvider: "agnes",
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 4096,
+  },
+  {
+    id: "agnes-video-2.5",
+    name: "Agnes Video 2.5",
+    api: "openai-completions",
+    input: ["text"],
+    opencodeVideoModel: true,
+    opencodeImageProvider: "agnes",
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 4096,
+  },
+  {
+    id: "agnes-video-2.5-flash",
+    name: "Agnes Video 2.5 Flash",
+    api: "openai-completions",
+    input: ["text"],
+    opencodeVideoModel: true,
     opencodeImageProvider: "agnes",
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 131072,
@@ -1235,8 +1358,8 @@ function initialModels() {
 
 // Derive a capabilities block from model metadata. Image-generation models
 // carry explicit opencodeImageModel metadata because their upstream endpoint
-// is not chat completions; verified Agnes/SenseNova models use the native
-// image-generation path below. Unknown providers remain conservative.
+// is not chat completions; verified Agnes/SenseNova models use native
+// image/video generation paths below. Unknown providers remain conservative.
 function withCapabilities(model) {
   const live = model.opencodeLiveModel ?? {};
   const asArray = (value) => Array.isArray(value) ? value.map(String).map((item) => item.toLowerCase()) : [];

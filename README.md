@@ -247,8 +247,11 @@ pi -p --provider agnes-cn --model agnes-cn/agnes-2.5-pro "你好"
 | `agnes-2.5-pro-alpha` | 打榜版付费推理模型（同上基准参考） | 1M | $0.45/M 输入、$0.90/M 输出 |
 | `agnes-image-2.0-flash` | 图像生成专用模型 | — | `/v1/images/generations` |
 | `agnes-image-2.1-flash` | 图像生成专用模型 | — | `/v1/images/generations` |
+| `agnes-video-v2.0` | 视频生成模型 | — | `/v1/videos` + 状态轮询 |
+| `agnes-video-2.5` | 视频生成模型 | — | `/v1/videos` + 状态轮询 |
+| `agnes-video-2.5-flash` | 视频生成模型 | — | `/v1/videos` + 状态轮询 |
 
-> `agnes-image-2.0-flash` 和 `agnes-image-2.1-flash` 已注册为图像模型，使用 `/v1/images/generations` 并通过 TUI Image 回显；视频模型仍未接入本目录。
+> Agnes 图像模型使用 `/v1/images/generations`，视频模型使用 `/v1/videos` 并轮询 `/agnesapi?video_id=...`；生成结果分别保存到 `.pi/generated-images/` 和 `.pi/generated-videos/`。
 
 > 🔭 **变动监听**：`.github/workflows/agnes-watch.yml` 每周巡检（04:35 UTC）：单模型文档页缺失＝疑似下线/改名；Flash 系文档「当前价格」非 $0＝限时免费撤销（最大风险）；参数指纹基线比对捕获原位升级/计费调整；`llms.txt` 全目录扫描发现新版本提示评估收录。全程匿名无需密钥。
 
