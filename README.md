@@ -173,7 +173,7 @@ export SENSENOVA_API_KEY=sk-xxx
 | `sensenova-u1-fast` | 图像生成专用模型 | 256K | `/v1/images/generations` |
 | `sensenova-u1.5-lite` | 图像生成/编辑模型 | 256K | `/v1/images/generations`、`/v1/images/edits` |
 
-`sensenova-u1-fast` 和 `sensenova-u1.5-lite` 已注册为图像模型，不会误走 chat completions；生成结果保存到 `.pi/generated-images/`，支持终端通过 TUI Image 回显。
+`sensenova-u1-fast` 和 `sensenova-u1.5-lite` 已注册为图像模型，不会误走 chat completions；生成结果保存到 `.pi/generated-images/`，支持终端通过 TUI Image 回显，保存路径在 TUI 中渲染为可点击的 `file://` 链接（OSC 8 超链接，Windows Terminal / WezTerm / iTerm2 / Kitty 可一键打开）。
 
 > 🔭 **变动监听**：`.github/workflows/sensenova-watch.yml` 每周巡检（04:59 UTC）。平台文档站是 SPA 壳无法匿名抓取，故走带密钥的权威目录 `GET /v1/models`（响应含 pricing 等计费元数据）：在册模型消失＝下线/改名；pricing 非 0＝免费档撤销；新 id 出现＝新模型上线并附计费元数据供评估收录。需配置 secret `SENSENOVA_API_KEY`；基线存 `.github/watch-state/` 由 workflow 自动提交。
 
@@ -209,7 +209,7 @@ pi -p --provider siliconflow --model siliconflow/Qwen/Qwen3-8B "你好"
 | `Qwen/Qwen3.5-4B` | Qwen3.5 4B 轻量长上下文 | 256K | 免费 |
 | `Tongyi-MAI/Z-Image-Turbo` | 文生图模型 | — | `/v1/images/generations` |
 
-> `Tongyi-MAI/Z-Image-Turbo` 已通过 SiliconFlow 图像端点验证并接入；CosyVoice TTS 需要 voice/reference 参数，暂未猜测并开放。
+> SiliconFlow 的图像 / 视频 / 音频均已接入并实测：文生图 `Tongyi-MAI/Z-Image-Turbo`（`/v1/images/generations`，响应 `data[].url`，已验证返回 PNG）；文生视频 `Wan-AI/Wan2.2-T2V-A14B`（`/v1/video/submit` 拿 `requestId` → 轮询 `/v1/video/status` 取 `results.videos[0].url`，已验证下载到 `video/mp4`）；TTS `FunAudioLLM/CosyVoice2-0.5B`（`voice` 格式 `{模型id}:{说话人}`，已验证）与 ASR `FunAudioLLM/SenseVoiceSmall`（已验证）。生成结果分别存到 `.pi/generated-images/`、`.pi/generated-videos/`、`.pi/generated-audio/`，并在 TUI 中渲染为可点击的 `file://` 链接（视频本质也是可点击路径，浏览器/播放器可打开）。
 
 > 其余仍有免费的类别：向量 `BAAI/bge-m3` 等、重排序 `bge-reranker-v2-m3`、ASR `SenseVoiceSmall`/`TeleSpeechASR`、生图 `Kolors`（均非编码对话用途）。原免费标杆 `Qwen2.5-7B-Instruct` 已收费；`glm-4-9b-chat`、`Qwen2-7B-Instruct`、`DeepSeek-R1-Distill-Qwen-7B`、`bce` 向量/重排序等已下线。
 
@@ -284,7 +284,7 @@ pi -p --provider agnes-cn --model agnes-cn/agnes-2.5-pro "你好"
 | `agnes-video-2.5` | 视频生成模型 | — | `/v1/videos` + 状态轮询 |
 | `agnes-video-2.5-flash` | 视频生成模型 | — | `/v1/videos` + 状态轮询 |
 
-> Agnes 图像模型使用 `/v1/images/generations`，视频模型使用 `/v1/videos` 并轮询 `/agnesapi?video_id=...`；生成结果分别保存到 `.pi/generated-images/` 和 `.pi/generated-videos/`。
+> Agnes 图像模型使用 `/v1/images/generations`，视频模型使用 `/v1/videos` 并轮询 `/agnesapi?video_id=...`；生成结果分别保存到 `.pi/generated-images/` 和 `.pi/generated-videos/`，保存路径在 TUI 中渲染为可点击的 `file://` 链接（OSC 8 超链接）。
 
 > 🔭 **变动监听**：`.github/workflows/agnes-watch.yml` 每周巡检（04:35 UTC）：单模型文档页缺失＝疑似下线/改名；Flash 系文档「当前价格」非 $0＝限时免费撤销（最大风险）；参数指纹基线比对捕获原位升级/计费调整；`llms.txt` 全目录扫描发现新版本提示评估收录。全程匿名无需密钥。
 
@@ -295,9 +295,22 @@ pi -p --provider agnes-cn --model agnes-cn/agnes-2.5-pro "你好"
 | 模型 ID | 能力 | 路由 |
 |---|---|---|
 | `@cf/black-forest-labs/flux-1-schnell` | 图像生成 | `ai/run/{model}` |
-| `@cf/deepgram/aura-2-en` | TTS | `ai/run/{model}` |
+| `@cf/deepgram/aura-2-en` | TTS（英语） | `ai/run/{model}` |
+| `@cf/deepgram/aura-2-es` | TTS（西班牙语） | `ai/run/{model}` |
 
-图像结果保存到 `.pi/generated-images/`，TTS 结果保存到 `.pi/generated-audio/`。Cloudflare 的 ASR 模型目录和 endpoint 已发现，但音频输入 schema 尚未确认，因此暂不注册 ASR 模型。
+图像结果保存到 `.pi/generated-images/`，TTS 结果保存到 `.pi/generated-audio/`，转写（ASR）结果保存到 `.pi/generated-transcripts/`，保存路径在 TUI 中渲染为可点击的 `file://` 链接（OSC 8 超链接）。Cloudflare 的 TTS 实测可用模型为 Deepgram Aura 2 的英语（`aura-2-en`）与西班牙语（`aura-2-es`），均为 `ai/run` 返回 `audio/mpeg`，其余语言变体在 Cloudflare 上未部署（返回 404 No route）。ASR 模型均已实测确认并注册：
+- `@cf/openai/whisper`：请求体为 JSON `{ audio: <0–255 整数数组（原始字节）> }`，传 base64 字符串或对象数组都会返回 400；响应取 `result.text`。
+- `@cf/deepgram/nova-3`：把**原始音频字节作为请求体**、`Content-Type: audio/*` 发送（JSON / 对象 / multipart 形式均会 400），响应取 `result.results.channels[0].alternatives[0].transcript`。
+两者都会把附带的音频文件 base64 解码后发送，转写文本与可点击的 `.pi/generated-transcripts/` 转录文件路径会回显在 TUI。
+
+**SiliconFlow 的 TTS 与 ASR** 接了 OpenAI 兼容音频接口（共享 `streamOpenAITTS` / `streamOpenAIASR`）：TTS 调 `{baseUrl}/audio/speech`（`voice` 默认 `FunAudioLLM/CosyVoice2-0.5B:alex`，可用模型 `opencodeVoice` 覆盖），ASR 调 `{baseUrl}/audio/transcriptions`（multipart 上传音频）。已注册：SiliconFlow 的 `FunAudioLLM/CosyVoice2-0.5B`(TTS) 与 `FunAudioLLM/SenseVoiceSmall`(ASR)。（ModelScope 音频为本地 Python SDK + GPU 推理、无公开 REST 端点，未接入；通用 handler 保留备用。）
+
+**SiliconFlow 文生视频** 走异步两步：POST `/v1/video/submit`（body 含 `model`/`prompt`/`image_size`，可选 `image` 用于图生视频）拿 `requestId`，再轮询 POST `/v1/video/status`（`{requestId}`）直到 `status: "Succeed"`，从 `results.videos[0].url` 下载（已验证返回 `video/mp4`，约 3 分钟出片）。已注册 `Wan-AI/Wan2.2-T2V-A14B`（文本→视频）；若要做图生视频，可加 `*I2V*` 模型并把首张图作为 `image` 传入。
+
+实测结论（用真实 key 跑过）：
+- ✅ **SiliconFlow ASR `FunAudioLLM/SenseVoiceSmall` 已验证**：返回正确转写文本（如 `"The quick brown fox jumps over the lazy dog."`）。注意模型 id 是小写 `SenseVoiceSmall`（不是 `SenseVoice-Small`）。
+- ✅ **SiliconFlow TTS `CosyVoice2-0.5B` 已验证**：按官方文档，`voice` 格式为 `{模型id}:{说话人}`（如 `FunAudioLLM/CosyVoice2-0.5B:alex`），已实测返回 `audio/mpeg`。种子模型已把 `opencodeVoice` 设为该值；如需换说话人，改 `opencodeVoice` 即可（与 `references` 字段互斥）。
+- ❌ **ModelScope 音频未接入（已移除死模型）**：实测 `api-inference.modelscope.cn` 的 OpenAI 兼容 `/v1/audio/*` 与 MaaS `/v1/models/iic/...`（含 SAMBERT、CosyVoice2、SenseVoiceSmall，覆盖 GET/POST、数字 id、`/inference` 后缀等 10+ 种形态）**全部 404**；结合模型卡（如 `IndexTeam/IndexTTS-2.5` 的「快速开始」只给本地 `uv sync` + `tts.infer(...)` + NVIDIA GPU 的用法）可确认：ModelScope 音频模型是**本地 Python SDK + GPU 推理**，没有托管的公开 REST 端点。因此已从种子列表移除 `iic/CosyVoice2-0.5B` / `iic/SenseVoiceSmall`（选了会 404）；通用 `streamOpenAITTS`/`streamOpenAIASR` handler 保留，若将来出现可公开调用的 ModelScope 音频端点可立即复用。
 
 Cloudflare 官方托管推理平台，走 **OpenAI 兼容端点**（`https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1`）。注意它**没有免费模型清单**：全平台共享每天 **10,000 Neurons** 的免费算力（UTC 0 点重置），而每个模型的单价差异极大（输出单价最高与最低相差约 16 倍）——大模型重活一天可能只够几轮。定位建议：轻量问答 / 兜底备用，不适合当主力；下表给出逐模型换算。
 

@@ -6,8 +6,18 @@ import { randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
+import { pathToFileURL } from "node:url";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Image, Markdown } from "@earendil-works/pi-tui";
+
+// ── Clickable file links ──────────────────────────────────────────────────
+// The TUI renders assistant text as Markdown and turns a `[label](url)` link
+// into a clickable OSC 8 hyperlink (supported by Windows Terminal, WezTerm,
+// iTerm2, Kitty, etc.). Convert absolute paths to Markdown links so generated
+// media opens in one click instead of copy-pasting the raw path.
+function fileLink(p, label = p) {
+  return `[${label}](${pathToFileURL(String(p)).href})`;
+}
 
 // ── Push-based stream (copied from pi-free lib/assistant-message-event-stream.js) ──
 class EventStream {
@@ -321,6 +331,21 @@ function latestImageRequest(context) {
   };
 }
 
+function latestAudioRequest(context) {
+  const messages = Array.isArray(context?.messages) ? context.messages : [];
+  const user = [...messages].reverse().find((message) => message?.role === "user");
+  if (!user || typeof user.content === "string") return { audios: [] };
+  const parts = Array.isArray(user.content) ? user.content : [];
+  const audios = parts
+    .filter((part) => part?.type === "audio" || (part?.mimeType ?? "").startsWith("audio/"))
+    .map((part) => ({
+      data: part?.data ?? part?.audio_url?.url ?? part?.audioUrl ?? "",
+      mimeType: part?.mimeType ?? "audio/wav",
+    }))
+    .filter((audio) => audio.data);
+  return { audios };
+}
+
 async function saveNativeImage(image, modelId) {
   const directory = join(process.cwd(), ".pi", "generated-images");
   if (!existsSync(directory)) mkdirSync(directory, { recursive: true });
@@ -367,7 +392,173 @@ function streamNativeAudio(model, context, options) {
       });
       if (!response.ok) throw new Error(`Cloudflare TTS HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
       const path = await saveNativeAudio(await response.arrayBuffer(), model.id, "mp3");
-      const text = `Generated audio saved to: ${path}`;
+      const text = `Generated audio saved to: ${fileLink(path)}`;
+      output.content.push({ type: "text", text });
+      stream.push({ type: "text_start", contentIndex: 0, partial: output });
+      stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: output });
+      stream.push({ type: "text_end", contentIndex: 0, content: text, partial: output });
+      output.stopReason = "stop";
+      stream.push({ type: "done", reason: "stop", message: output });
+      stream.end();
+    } catch (error) {
+      output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+      output.errorMessage = error instanceof Error ? error.message : String(error);
+      stream.push({ type: "error", reason: "error", error: output });
+      stream.end();
+    }
+  })();
+  return stream;
+}
+
+async function saveNativeTranscript(text, modelId) {
+  const directory = join(process.cwd(), ".pi", "generated-transcripts");
+  if (!existsSync(directory)) mkdirSync(directory, { recursive: true });
+  const path = join(directory, `opencode-${modelId.replaceAll("/", "_")}-${Date.now()}.txt`);
+  writeFileSync(path, text, "utf-8");
+  return path;
+}
+
+// Cloudflare Workers AI speech-to-text. Two verified transports:
+//  • whisper (`@cf/openai/whisper`): POST JSON `{ audio: <0–255 byte array> }`;
+//    a base64 string / object is rejected with HTTP 400. Response `{ result: { text } }`.
+//  • Deepgram nova (`@cf/deepgram/nova-3`, flag opencodeAsrRawBody): POST the raw
+//    audio bytes as the request body with `Content-Type: audio/*`. Response:
+//    `{ result: { results: { channels: [{ alternatives: [{ transcript }] }] } } }`.
+// Both decode the attached audio's base64 `data` before sending.
+function streamNativeTranscription(model, context, options) {
+  const stream = new AssistantMessageEventStream();
+  const output = makeOutput(model);
+  (async () => {
+    try {
+      stream.push({ type: "start", partial: output });
+      const { audios } = latestAudioRequest(context);
+      if (audios.length === 0) throw new Error("Transcription requires an audio input (attach an audio file)");
+      const audio = audios[0];
+      const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+      const apiKey = process.env.CLOUDFLARE_API_KEY;
+      if (!accountId || !apiKey) throw new Error("CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_KEY are required for transcription");
+      const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model.id}`;
+      let response;
+      if (model.opencodeAsrRawBody) {
+        // Deepgram nova: raw audio bytes as the body, with an audio/* Content-Type
+        response = await fetch(url, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": audio.mimeType || "audio/wav" },
+          body: Buffer.from(audio.data, "base64"),
+          signal: options?.signal,
+        });
+      } else {
+        // whisper: { audio: <0–255 byte array> } as JSON
+        let audioBytes;
+        try {
+          audioBytes = Array.from(Buffer.from(audio.data, "base64"));
+        } catch {
+          throw new Error("Failed to decode attached audio (expected base64)");
+        }
+        response = await fetch(url, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ audio: audioBytes }),
+          signal: options?.signal,
+        });
+      }
+      if (!response.ok) throw new Error(`Cloudflare transcription HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
+      const payload = await response.json();
+      const result = payload?.result ?? payload;
+      const transcript =
+        result?.text ??
+        result?.transcript ??
+        result?.results?.channels?.[0]?.alternatives?.[0]?.transcript ??
+        payload?.text ??
+        "";
+      if (!transcript) throw new Error("Transcription returned no text");
+      const path = await saveNativeTranscript(transcript, model.id);
+      const text = `Transcription (${model.id}):\n\n${transcript}\n\nSaved transcript to: ${fileLink(path)}`;
+      output.content.push({ type: "text", text });
+      stream.push({ type: "text_start", contentIndex: 0, partial: output });
+      stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: output });
+      stream.push({ type: "text_end", contentIndex: 0, content: text, partial: output });
+      output.stopReason = "stop";
+      stream.push({ type: "done", reason: "stop", message: output });
+      stream.end();
+    } catch (error) {
+      output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+      output.errorMessage = error instanceof Error ? error.message : String(error);
+      stream.push({ type: "error", reason: "error", error: output });
+      stream.end();
+    }
+  })();
+  return stream;
+}
+
+// Generic OpenAI-compatible audio endpoints: POST `{baseUrl}/audio/speech` for
+// TTS and `{baseUrl}/audio/transcriptions` (multipart) for ASR. Used by
+// SiliconFlow and ModelScope. SiliconFlow's shape is verified; ModelScope's
+// audio compatibility is unverified (no API key in this environment) and may
+// need a different path / voice-reference params.
+function streamOpenAITTS(model, context, options, baseUrl, envKey) {
+  const stream = new AssistantMessageEventStream();
+  const output = makeOutput(model);
+  (async () => {
+    try {
+      stream.push({ type: "start", partial: output });
+      const prompt = latestImageRequest(context).prompt;
+      if (!prompt) throw new Error("TTS requires text input");
+      const apiKey = process.env[envKey];
+      if (!apiKey) throw new Error(`${envKey} is required for TTS`);
+      const response = await fetch(`${baseUrl}/audio/speech`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model: model.id, input: prompt, voice: model.opencodeVoice ?? "female", response_format: "mp3" }),
+        signal: options?.signal,
+      });
+      if (!response.ok) throw new Error(`TTS HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
+      const bytes = Buffer.from(await response.arrayBuffer());
+      const path = await saveNativeAudio(bytes, model.id, "mp3");
+      const text = `Speech generated (${model.id}):\n\nSaved audio to: ${fileLink(path)}`;
+      output.content.push({ type: "text", text });
+      stream.push({ type: "text_start", contentIndex: 0, partial: output });
+      stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: output });
+      stream.push({ type: "text_end", contentIndex: 0, content: text, partial: output });
+      output.stopReason = "stop";
+      stream.push({ type: "done", reason: "stop", message: output });
+      stream.end();
+    } catch (error) {
+      output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+      output.errorMessage = error instanceof Error ? error.message : String(error);
+      stream.push({ type: "error", reason: "error", error: output });
+      stream.end();
+    }
+  })();
+  return stream;
+}
+
+function streamOpenAIASR(model, context, options, baseUrl, envKey) {
+  const stream = new AssistantMessageEventStream();
+  const output = makeOutput(model);
+  (async () => {
+    try {
+      stream.push({ type: "start", partial: output });
+      const { audios } = latestAudioRequest(context);
+      if (audios.length === 0) throw new Error("Transcription requires an audio input (attach an audio file)");
+      const audio = audios[0];
+      const apiKey = process.env[envKey];
+      if (!apiKey) throw new Error(`${envKey} is required for transcription`);
+      const fd = new FormData();
+      fd.append("file", new Blob([Buffer.from(audio.data, "base64")], { type: audio.mimeType || "audio/wav" }), "audio");
+      fd.append("model", model.id);
+      const response = await fetch(`${baseUrl}/audio/transcriptions`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}` },
+        body: fd,
+        signal: options?.signal,
+      });
+      if (!response.ok) throw new Error(`ASR HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
+      const payload = await response.json().catch(() => null);
+      const transcript = payload?.text ?? payload?.transcript ?? (typeof payload === "string" ? payload : "");
+      if (!transcript) throw new Error("Transcription returned no text");
+      const path = await saveNativeTranscript(transcript, model.id);
+      const text = `Transcription (${model.id}):\n\n${transcript}\n\nSaved transcript to: ${fileLink(path)}`;
       output.content.push({ type: "text", text });
       stream.push({ type: "text_start", contentIndex: 0, partial: output });
       stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: output });
@@ -424,6 +615,56 @@ function streamNativeVideo(model, context, options) {
       stream.push({ type: "start", partial: output });
       const { prompt, images } = latestImageRequest(context);
       if (!prompt) throw new Error("Video generation requires a text prompt");
+      if (model.opencodeVideoProvider === "siliconflow") {
+        const baseUrl = "https://api.siliconflow.cn/v1";
+        const apiKey = process.env.SILICONFLOW_API_KEY ?? "";
+        if (!apiKey) throw new Error("SILICONFLOW_API_KEY is required for video generation");
+        const body = { model: model.id, prompt, image_size: model.opencodeVideoSize ?? "1280x720" };
+        if (images.length) body.image = `data:${images[0].mimeType};base64,${images[0].data}`;
+        const subRes = await fetch(`${baseUrl}/video/submit`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal: options?.signal,
+        });
+        const sub = await subRes.json();
+        if (!subRes.ok) throw new Error(sub?.message ?? sub?.error?.message ?? `Video submit HTTP ${subRes.status}`);
+        const requestId = sub?.requestId ?? sub?.request_id ?? sub?.task_id ?? sub?.taskId;
+        if (!requestId) throw new Error("Video submit returned no requestId");
+        const deadline = Date.now() + 30 * 60 * 1000;
+        let result;
+        while (Date.now() < deadline) {
+          if (options?.signal?.aborted) throw new Error("Video generation aborted");
+          await new Promise((resolve, reject) => {
+            const timer = setTimeout(resolve, 5000);
+            options?.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("Video generation aborted")); }, { once: true });
+          });
+          const stRes = await fetch(`${baseUrl}/video/status`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ requestId }),
+            signal: options?.signal,
+          });
+          const st = await stRes.json();
+          if (!stRes.ok) throw new Error(st?.message ?? st?.error?.message ?? `Video status HTTP ${stRes.status}`);
+          const status = st?.status ?? st?.data?.status ?? st?.statuses?.status;
+          if (["Succeed", "Succeeded", "completed", "success"].includes(status)) { result = st; break; }
+          if (["Failed", "failed", "error"].includes(status)) throw new Error(st?.message ?? st?.error?.message ?? "Video generation failed");
+        }
+        if (!result) throw new Error("Video generation timed out after 30 minutes");
+        const url = result?.results?.videos?.[0]?.url ?? result?.video_url ?? result?.url ?? result?.data?.video_url;
+        if (!url) throw new Error("Video status returned no video url");
+        const path = await saveNativeVideo(url, model.id);
+        const text = `Generated video saved to: ${fileLink(path)}\n\nVideo URL: ${url}`;
+        output.content.push({ type: "text", text });
+        stream.push({ type: "text_start", contentIndex: 0, partial: output });
+        stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: output });
+        stream.push({ type: "text_end", contentIndex: 0, content: text, partial: output });
+        output.stopReason = "stop";
+        stream.push({ type: "done", reason: "stop", message: output });
+        stream.end();
+        return;
+      }
       const isCN = model.opencodeImageProvider === "agnes-cn";
       const baseUrl = isCN ? "https://api.agnes-ai.cn/v1" : "https://apihub.agnes-ai.com/v1";
       const envKey = isCN ? "AGNES_CN_API_KEY" : "AGNES_API_KEY";
@@ -449,7 +690,7 @@ function streamNativeVideo(model, context, options) {
       const url = result?.metadata?.url;
       if (!url) throw new Error("Video API returned no metadata.url");
       const path = await saveNativeVideo(url, model.id);
-      const text = `Generated video saved to: ${path}\n\nVideo URL: ${url}`;
+      const text = `Generated video saved to: ${fileLink(path)}\n\nVideo URL: ${url}`;
       output.content.push({ type: "text", text });
       stream.push({ type: "text_start", contentIndex: 0, partial: output });
       stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: output });
@@ -492,7 +733,7 @@ function streamNativeImage(model, context, options) {
         const payload = await response.json();
         if (!response.ok) throw new Error(payload?.errors?.[0]?.message ?? `Cloudflare image API HTTP ${response.status}`);
         const saved = await saveNativeImage({ b64_json: payload?.result?.image, mime_type: "image/jpeg" }, model.id);
-        const text = `Generated image saved to: ${saved.path}`;
+        const text = `Generated image saved to: ${fileLink(saved.path)}`;
         output.content.push({ type: "text", text });
         stream.push({ type: "text_start", contentIndex: 0, partial: output });
         stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: output });
@@ -541,7 +782,7 @@ function streamNativeImage(model, context, options) {
       const image = payload?.data?.[0];
       if (!image) throw new Error("Image API returned no image data");
       const saved = await saveNativeImage(image, model.id);
-      const text = `Generated image saved to: ${saved.path}`;
+      const text = `Generated image saved to: ${fileLink(saved.path)}`;
       output.content.push({ type: "text", text });
       stream.push({ type: "text_start", contentIndex: 0, partial: output });
       stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: output });
@@ -647,12 +888,22 @@ const streamSenseNova = (model, context, options) =>
   model.opencodeImageModel ? streamNativeImage(model, context, options) : streamSenseNovaChat(model, context, options);
 
 // Standard OpenAI-compatible providers
-const streamSiliconFlowChat = makeOpenAIStream("https://api.siliconflow.cn/v1", "SILICONFLOW_API_KEY");
-const streamSiliconFlow = (model, context, options) =>
-  model.opencodeImageModel ? streamNativeImage(model, context, options) : streamSiliconFlowChat(model, context, options);
-const streamModelScope = makeOpenAIStream("https://api-inference.modelscope.cn/v1", "MODELSCOPE_API_KEY", {
-  maxTokens: 65536,
-});
+const SF_URL = "https://api.siliconflow.cn/v1";
+const streamSiliconFlowChat = makeOpenAIStream(SF_URL, "SILICONFLOW_API_KEY");
+const streamSiliconFlow = (model, context, options) => {
+  if (model.opencodeTranscriptionModel) return streamOpenAIASR(model, context, options, SF_URL, "SILICONFLOW_API_KEY");
+  if (model.opencodeAudioModel) return streamOpenAITTS(model, context, options, SF_URL, "SILICONFLOW_API_KEY");
+  if (model.opencodeImageModel) return streamNativeImage(model, context, options);
+  if (model.opencodeVideoModel) return streamNativeVideo(model, context, options);
+  return streamSiliconFlowChat(model, context, options);
+};
+const MS_URL = "https://api-inference.modelscope.cn/v1";
+const streamModelScopeChat = makeOpenAIStream(MS_URL, "MODELSCOPE_API_KEY", { maxTokens: 65536 });
+const streamModelScope = (model, context, options) => {
+  if (model.opencodeTranscriptionModel) return streamOpenAIASR(model, context, options, MS_URL, "MODELSCOPE_API_KEY");
+  if (model.opencodeAudioModel) return streamOpenAITTS(model, context, options, MS_URL, "MODELSCOPE_API_KEY");
+  return streamModelScopeChat(model, context, options);
+};
 const streamNvidia = makeOpenAIStream("https://integrate.api.nvidia.com/v1", "NVIDIA_NIM_API_KEY");
 
 // Agnes AI — OpenAI-compatible gateway (apihub.agnes-ai.com = 国际站,
@@ -689,6 +940,7 @@ const streamAgnesCN = (model, context, options) =>
 // (deepseek-v4-flash/pro, glm-5.2, kimi-k2.6/k2.7-code) require paid billing
 // and are intentionally NOT registered here.
 const streamCloudflare = (model, context, options) => {
+  if (model.opencodeTranscriptionModel) return streamNativeTranscription(model, context, options);
   if (model.opencodeImageModel) return streamNativeImage(model, context, options);
   if (model.opencodeAudioModel) return streamNativeAudio(model, context, options);
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
@@ -1076,6 +1328,40 @@ const SILICONFLOW_MODELS = [
     contextWindow: 131072,
     maxTokens: 4096,
   },
+  {
+    id: "FunAudioLLM/CosyVoice2-0.5B",
+    name: "CosyVoice2 0.5B (SiliconFlow TTS)",
+    api: "openai-completions",
+    input: ["text"],
+    opencodeAudioModel: true,
+    opencodeAudioProvider: "openai-audio",
+    opencodeVoice: "FunAudioLLM/CosyVoice2-0.5B:alex",
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 4096,
+  },
+  {
+    id: "FunAudioLLM/SenseVoiceSmall",
+    name: "SenseVoiceSmall (SiliconFlow ASR)",
+    api: "openai-completions",
+    input: ["audio"],
+    opencodeTranscriptionModel: true,
+    opencodeAsrProvider: "openai-audio",
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 4096,
+  },
+  {
+    id: "Wan-AI/Wan2.2-T2V-A14B",
+    name: "Wan2.2 T2V A14B (SiliconFlow video)",
+    api: "openai-completions",
+    input: ["text"],
+    opencodeVideoModel: true,
+    opencodeVideoProvider: "siliconflow",
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 4096,
+  },
 ];
 const MODELSCOPE_MODELS = [
   {
@@ -1264,6 +1550,40 @@ const CLOUDFLARE_MODELS = [
     input: ["text"],
     opencodeAudioModel: true,
     opencodeAudioProvider: "cloudflare",
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 4096,
+  },
+  {
+    id: "@cf/deepgram/aura-2-es",
+    name: "Deepgram Aura 2 Spanish (via Cloudflare TTS)",
+    api: "openai-completions",
+    input: ["text"],
+    opencodeAudioModel: true,
+    opencodeAudioProvider: "cloudflare",
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 4096,
+  },
+  {
+    id: "@cf/openai/whisper",
+    name: "OpenAI Whisper (via Cloudflare ASR)",
+    api: "openai-completions",
+    input: ["audio"],
+    opencodeTranscriptionModel: true,
+    opencodeAsrProvider: "cloudflare",
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 131072,
+    maxTokens: 4096,
+  },
+  {
+    id: "@cf/deepgram/nova-3",
+    name: "Deepgram Nova-3 (via Cloudflare ASR)",
+    api: "openai-completions",
+    input: ["audio"],
+    opencodeTranscriptionModel: true,
+    opencodeAsrProvider: "cloudflare",
+    opencodeAsrRawBody: true,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 131072,
     maxTokens: 4096,
@@ -1483,7 +1803,7 @@ function withCapabilities(model) {
     type === "image" || live.supports_image_generation === true || has("image_generation");
   const video = model.opencodeVideoModel === true || outputModalities.includes("video") ||
     type === "video" || live.supports_video === true || has("video");
-  const audio = model.opencodeAudioModel === true || inputModalities.includes("audio") || outputModalities.includes("audio") ||
+  const audio = model.opencodeAudioModel === true || model.opencodeTranscriptionModel === true || inputModalities.includes("audio") || outputModalities.includes("audio") ||
     type === "audio" || live.supports_audio === true || has("audio", "speech", "transcription");
   const tools = live.features?.tools === false || live.capabilities?.tools === false
     ? false
@@ -1507,9 +1827,16 @@ function registerAll(pi, m) {
     const image = entry.data ?? {};
     try {
       const data = readFileSync(image.path).toString("base64");
-      return new Image(data, image.mimeType || "image/png", theme, { maxWidthCells: 80, maxHeightCells: 30 });
+      // Image.render calls theme.fallbackColor(), but the global `theme` passed
+      // to entry renderers does not define it (pi bug). Provide a compatible
+      // wrapper so the inline image preview renders and we never crash.
+      const imageTheme = theme && typeof theme.fallbackColor === "function"
+        ? theme
+        : { fallbackColor: (s) => (theme && theme.fg ? theme.fg("toolOutput", s) : s) };
+      return new Image(data, image.mimeType || "image/png", imageTheme, { maxWidthCells: 80, maxHeightCells: 30 });
     } catch {
-      return new Markdown(`Generated image unavailable: ${image.path ?? "unknown path"}`, 1, 0, getMarkdownTheme());
+      const unavailablePath = image.path ?? "unknown path";
+      return new Markdown(`Generated image unavailable: ${fileLink(unavailablePath)}`, 1, 0, getMarkdownTheme());
     }
   });
   // Augment each model with a capabilities block (derived from reasoning/input).
