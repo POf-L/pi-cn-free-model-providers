@@ -26,6 +26,8 @@ coverage/
 .omo/
 .codegraph/
 .opencode/
+.pi/
+.pi-web/
 
 # ── Logs ──
 *.log
