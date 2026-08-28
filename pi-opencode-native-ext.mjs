@@ -1045,29 +1045,52 @@ const CLOUDFLARE_MODELS = [
 ];
 
 // ── Live model-list drift detection ──
-// Fetch a provider's /v1/models and return the set of ids. Best-effort: any
-// non-OK status, unexpected shape, or network error returns null so callers
-// fall back to the curated allowlist (registration never breaks).
-async function fetchLiveModelIds(url, headers) {
+// Fetch complete model objects from a provider's /v1/models. The live payload
+// is retained so capability metadata (modalities/features/supports_*) is not
+// lost while doing drift detection.
+async function fetchLiveModels(url, headers) {
   try {
     const res = await fetch(url, { headers, signal: AbortSignal.timeout(8000) });
     if (!res.ok) return null;
     const json = await res.json();
     const data = Array.isArray(json) ? json : json?.data;
     if (!Array.isArray(data)) return null;
-    return new Set(data.map((m) => m.id ?? m.name).filter(Boolean));
+    return data.filter((model) => model && (model.id ?? model.name));
   } catch {
     return null;
   }
 }
+
+async function fetchLiveModelIds(url, headers) {
+  const models = await fetchLiveModels(url, headers);
+  return models ? new Set(models.map((model) => model.id ?? model.name).filter(Boolean)) : null;
+}
+
 function authHeader(envKey) {
   return { Authorization: `Bearer ${process.env[envKey] ?? "public"}` };
 }
-// Intersect curated with live ids; drop models no longer present upstream.
+
+function mergeLiveModel(curated, live) {
+  // Keep curated routing/cost/limit metadata authoritative, while retaining
+  // the complete upstream object for capability detection and diagnostics.
+  return {
+    ...live,
+    ...curated,
+    id: curated.id,
+    name: curated.name ?? live.name ?? live.label ?? curated.id,
+    opencodeLiveModel: live,
+  };
+}
+
+// Keep the curated allowlist for safety, but return each retained model with
+// its complete upstream metadata instead of reducing /v1/models to IDs.
 async function filterToLive(curated, url, headers) {
-  const live = await fetchLiveModelIds(url, headers);
-  if (!live) return curated;
-  const kept = curated.filter((m) => live.has(m.id));
+  const liveModels = await fetchLiveModels(url, headers);
+  if (!liveModels) return curated;
+  const byId = new Map(liveModels.map((model) => [model.id ?? model.name, model]));
+  const kept = curated
+    .filter((model) => byId.has(model.id))
+    .map((model) => mergeLiveModel(model, byId.get(model.id)));
   return kept.length ? kept : curated;
 }
 
@@ -1215,16 +1238,39 @@ function initialModels() {
 // is not chat completions; verified Agnes/SenseNova models use the native
 // image-generation path below. Unknown providers remain conservative.
 function withCapabilities(model) {
-  const input = Array.isArray(model.input) ? model.input : ["text"];
+  const live = model.opencodeLiveModel ?? {};
+  const asArray = (value) => Array.isArray(value) ? value.map(String).map((item) => item.toLowerCase()) : [];
+  const inputModalities = asArray(live.input_modalities ?? live.inputModalities ?? model.input);
+  const outputModalities = asArray(live.output_modalities ?? live.outputModalities);
+  const featureValues = [
+    ...asArray(live.supported_features),
+    ...asArray(live.features),
+    ...asArray(live.capabilities),
+  ];
+  const type = String(live.type ?? live.model_type ?? "").toLowerCase();
+  const has = (...names) => {
+    const wanted = names.map((name) => name.toLowerCase());
+    return wanted.some((name) => featureValues.includes(name)) || wanted.some((name) => live?.[name] === true);
+  };
+  const vision = model.opencodeImageModel ? false : inputModalities.includes("image") || live.multimodal === true;
+  const image = model.opencodeImageModel === true || outputModalities.includes("image") ||
+    type === "image" || live.supports_image_generation === true || has("image_generation");
+  const video = model.opencodeVideoModel === true || outputModalities.includes("video") ||
+    type === "video" || live.supports_video === true || has("video");
+  const audio = model.opencodeAudioModel === true || inputModalities.includes("audio") || outputModalities.includes("audio") ||
+    type === "audio" || live.supports_audio === true || has("audio", "speech", "transcription");
+  const tools = live.features?.tools === false || live.capabilities?.tools === false
+    ? false
+    : model.tools !== false;
   return {
     ...model,
     capabilities: {
-      tools: model.tools !== false,
-      vision: input.includes("image") && !model.opencodeImageModel,
-      image: model.opencodeImageModel === true,
-      video: model.opencodeVideoModel === true,
-      audio: model.opencodeAudioModel === true,
-      reasoning: !!model.reasoning,
+      tools,
+      vision,
+      image,
+      video,
+      audio,
+      reasoning: !!model.reasoning || live.reasoning === true || live.supports_reasoning === true,
     },
   };
 }
