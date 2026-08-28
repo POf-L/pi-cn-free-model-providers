@@ -1607,6 +1607,99 @@ const OPENCODE_PROVIDER_IDS = [
   "agnes-cn",
 ];
 
+const OPENCODE_SESSION_USAGE = new Map();
+let opencodeUsageHookInstalled = false;
+
+function showOpenCodeMarkdown(pi, ctx, key, markdown) {
+  if (ctx.mode === "tui") pi.appendEntry(key, { markdown });
+  else if (ctx.hasUI) ctx.ui.notify(markdown, "info");
+  else console.log(markdown);
+}
+
+function formatPrice(value) {
+  if (value === undefined || value === null) return "—";
+  if (Number(value) === 0) return "free/0";
+  return `$${Number(value).toFixed(4)}`;
+}
+
+function registerPricesCommand(pi) {
+  pi.registerCommand("opencode-prices", {
+    description: "List OpenCode-native model catalog prices per 1M tokens; optional provider filter",
+    handler: async (args, ctx) => {
+      const provider = (args || "").trim().split(/\\s+/).find((token) => OPENCODE_PROVIDER_IDS.includes(token));
+      const models = (pi.modelRegistry?.getAvailable?.() ?? []).filter((model) =>
+        OPENCODE_PROVIDER_IDS.includes(model.provider) && (!provider || model.provider === provider),
+      );
+      const rows = models.sort((a, b) => a.provider === b.provider ? a.id.localeCompare(b.id) : a.provider.localeCompare(b.provider)).map((model) => ({
+        provider: model.provider,
+        id: model.id,
+        input: model.cost?.input,
+        output: model.cost?.output,
+        total: (Number(model.cost?.input) || 0) + (Number(model.cost?.output) || 0),
+        context: model.contextWindow ?? 0,
+      }));
+      const markdown = [
+        `# OpenCode-native model prices${provider ? ` (${provider})` : ""}`,
+        "",
+        "_Catalog values are USD per 1M tokens. Zero means the curated catalog marks the model free; `—` means no price metadata._",
+        "",
+        "| Provider | Model | Input | Output | Total | Context |",
+        "|---|---|---:|---:|---:|---:|",
+        ...rows.map((row) => `| ${row.provider} | ${row.id} | ${formatPrice(row.input)} | ${formatPrice(row.output)} | ${formatPrice(row.total)} | ${row.context ? `${Math.round(row.context / 1000)}K` : "—"} |`),
+        "",
+        rows.length ? "" : "_No registered models match the filter._",
+      ].join("\n");
+      showOpenCodeMarkdown(pi, ctx, "opencode-prices", markdown);
+    },
+  });
+  pi.registerEntryRenderer("opencode-prices", (entry) => new Markdown(entry.data.markdown, 1, 0, getMarkdownTheme()));
+}
+
+function installUsageTracker(pi) {
+  if (opencodeUsageHookInstalled || typeof pi.on !== "function") return;
+  opencodeUsageHookInstalled = true;
+  pi.on("message_end", (event) => {
+    const message = event?.message;
+    if (message?.role !== "assistant" || !OPENCODE_PROVIDER_IDS.includes(message.provider)) return;
+    const key = `${message.provider}/${message.model}`;
+    const previous = OPENCODE_SESSION_USAGE.get(key) ?? { provider: message.provider, model: message.model, input: 0, output: 0, total: 0, cost: 0, turns: 0 };
+    const usage = message.usage ?? {};
+    const cost = usage.cost ?? {};
+    const turnInput = Number(usage.input) || 0;
+    const turnOutput = Number(usage.output) || 0;
+    const turnTotal = Number(usage.totalTokens) || turnInput + turnOutput;
+    previous.input += turnInput;
+    previous.output += turnOutput;
+    previous.total += turnTotal;
+    previous.cost += Number(cost.total) || 0;
+    previous.turns += 1;
+    OPENCODE_SESSION_USAGE.set(key, previous);
+  });
+}
+
+function registerUsageCommand(pi) {
+  pi.registerCommand("opencode-usage", {
+    description: "Show OpenCode-native token/cost usage accumulated in the current Pi process",
+    handler: async (_args, ctx) => {
+      const rows = [...OPENCODE_SESSION_USAGE.values()].sort((a, b) => a.provider === b.provider ? a.model.localeCompare(b.model) : a.provider.localeCompare(b.provider));
+      const total = rows.reduce((sum, row) => sum + row.cost, 0);
+      const markdown = [
+        "# OpenCode-native session usage",
+        "",
+        "_This is process/session usage from assistant messages, not a provider billing dashboard. Provider billing APIs are not uniform._",
+        "",
+        "| Provider | Model | Turns | Input tokens | Output tokens | Total tokens | Cost |",
+        "|---|---|---:|---:|---:|---:|---:|",
+        ...rows.map((row) => `| ${row.provider} | ${row.model} | ${row.turns} | ${row.input.toLocaleString()} | ${row.output.toLocaleString()} | ${row.total.toLocaleString()} | $${row.cost.toFixed(6)} |`),
+        "",
+        rows.length ? `**Session total:** $${total.toFixed(6)}` : "_No assistant usage recorded in this Pi process yet._",
+      ].join("\n");
+      showOpenCodeMarkdown(pi, ctx, "opencode-usage", markdown);
+    },
+  });
+  pi.registerEntryRenderer("opencode-usage", (entry) => new Markdown(entry.data.markdown, 1, 0, getMarkdownTheme()));
+}
+
 function registerCapabilitiesCommand(pi) {
   const flags = {
     reasoning: "reasoning",
@@ -1714,6 +1807,9 @@ export default function (pi) {
   // /reload.
   registerAll(pi, initialModels());
   registerCapabilitiesCommand(pi);
+  registerPricesCommand(pi);
+  installUsageTracker(pi);
+  registerUsageCommand(pi);
   setTimeout(() => {
     verifyAndUpdateModels(pi).catch(() => {});
   }, 100);

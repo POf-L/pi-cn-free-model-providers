@@ -640,7 +640,9 @@ opencode 原生方式不经过 `cleanBody`，但实测标准对话/工具调用�
 
 ## 命令
 
-- `/opencode-capabilities [image|video|audio|vision|reasoning|tools]` — 列出本扩展注册的全部 provider（`opencode-fix` / `sensenova` / `siliconflow` / `modelscope` / `nvidia` / `cloudflare` / `agnes` / `agnes-cn`）下每个模型的能力。能力由模型的 `reasoning` / `input` / 已验证的图像元数据推导；已验证的 Agnes/SenseNova 图像生成模型也会注册并使用原生 image endpoint。
+- `/opencode-capabilities [image|video|audio|vision|reasoning|tools]` — 列出本扩展注册的全部 provider 下每个模型的能力；已验证的图像/视频/音频模型也会注册并使用原生 endpoint。
+- `/opencode-prices [provider]` — 查询已注册模型的 catalog 定价（USD/1M tokens、上下文窗口）。零值表示 curated catalog 标记为免费；没有真实价格时显示 `—`。
+- `/opencode-usage` — 查询当前 Pi 进程累计的 token/cost 使用量。它是 session usage，不是各 provider 的后台账单；各 provider 没有统一 usage API。
 
 ## ModLens 视觉引擎切换
 
