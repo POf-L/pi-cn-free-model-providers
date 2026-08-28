@@ -945,16 +945,6 @@ const ZEN_FREE_MODELS = [
     contextWindow: 200000,
     maxTokens: 128000,
   },
-  {
-    id: "x-preview-f-free",
-    name: "Ox Alpha Free",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 200000,
-    maxTokens: 128000,
-  },
 ];
 const SENSENOVA_MODELS = [
   {

@@ -19,12 +19,14 @@ pi 内置的 opencode provider 不使用 opencode UA，因此直接调用免费�
 
 模型发现转为**后台**进行：
 
-- 启动后用 `setTimeout` 触发一次 `verifyAndUpdateModels`：逐个 provider 拉取实时 `/v1/models` 与内置白名单做交集（去漂移），Zen 还会逐个探测免费状态；
+- 启动后用 `setTimeout` 触发一次 `verifyAndUpdateModels`：逐个 provider 拉取实时 `/v1/models` 与内置白名单做交集（去漂移），Zen 还会逐个探测免费状态；已转付费、下线或改名的模型会在后台自动剔除；
 - 每个请求带硬超时（单请求 5–8s，整体 45s 上限），任一 provider 失败/超时只会保留已有列表，绝不让注册中断；
 - 发现结果**热更新**目录（pi 在加载后注册 provider 会立即生效，无需 `/reload`）；
 - 结果持久化到 `~/.pi/cache/opencode-native-models.json`（24h TTL）。下次启动即使**完全离线**，也能用缓存里的模型列表秒开；缓存过期或缺失时回退到内置白名单。
 
 > 行为等价于 agnes / sensenova 扩展的 `refreshModels` 模式；本扩展一次注册多个供应商（含 OpenCode Zen 免费通道），故用「后台热重注册」实现同样的非阻塞效果。
+>
+> **动态清单说明**：README 中的模型表是人工维护的能力/定位快照，不作为运行时可用性的唯一依据。启动后的实时目录和免费状态探测会自动剔除已下线或转付费模型；供应商价格变化由 GitHub Actions 巡检并通过 Issue 提醒，确认后再同步更新代码和 README。
 
 ## 安装
 
@@ -136,7 +138,10 @@ pi --model opencode-zen/hy3-free
 | `mimo-v2.5-free` | 多模态 |
 | `nemotron-3-ultra-free` | 超长上下文（1M） |
 | `nemotron-3.5-lightning-free` | 高速执行 |
-| `x-preview-f-free` | Ox Alpha，匿名 stealth 模型（零保留隐私政策） |
+
+> `x-preview-f-free`（Ox Alpha）已转为付费并从 Zen 目录移除，因此不再注册。历史模型状态请以实时目录和价格探测为准。
+>
+> 🔭 **变动监听**：`.github/workflows/opencode-zen-watch.yml` 每日巡检 `/v1/models`，并使用匿名 `public` key 对在册模型做最小探测；模型消失或返回鉴权/计费拒绝时自动创建或更新维护 Issue。网络错误、429 和 5xx 只记为 UNKNOWN，不会误判为付费。
 
 TUI 内 **Ctrl+P** 循环切换模型。
 

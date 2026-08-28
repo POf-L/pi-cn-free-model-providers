@@ -1,0 +1,117 @@
+name: opencode-zen-model-watch
+
+# OpenCode Zen 的 /v1/models 不提供可靠的价格字段：
+# 1) 模型消失 = 下线/改名；
+# 2) 模型仍在目录但匿名 public 探测返回 401/402/403 = 免费档撤销；
+# 3) 429/5xx/网络错误只记为 UNKNOWN，不误判为付费。
+# 运行时扩展也会在启动后台做同样的实时交集与免费探测；本 workflow
+# 负责每日巡检并通过 Issue 提醒维护者同步代码和 README。
+
+on:
+  schedule:
+    - cron: "17 1 * * *" # 每日 01:17 UTC
+  workflow_dispatch: {}
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract curated OpenCode Zen model ids
+        run: |
+          set -euo pipefail
+          awk '/^const ZEN_FREE_MODELS/,/^\];/' pi-cn-free-model-providers-ext.mjs \
+            | grep -o 'id: "[^"]*"' | cut -d'"' -f2 > /tmp/curated.txt
+          test -s /tmp/curated.txt
+          echo "在册模型 $(wc -l < /tmp/curated.txt) 个:"
+          cat /tmp/curated.txt
+
+      - name: Fetch live model catalog
+        run: |
+          set -euo pipefail
+          curl -fsSL --max-time 30 \
+            -H "User-Agent: opencode/1.15.5" \
+            -H "x-opencode-client: cli" \
+            -H "Authorization: Bearer public" \
+            "https://opencode.ai/zen/v1/models" -o /tmp/models.json
+          jq -r '.data[]?.id // empty' /tmp/models.json | sort -u > /tmp/live.txt
+          test -s /tmp/live.txt
+          echo "在线目录 $(wc -l < /tmp/live.txt) 个模型"
+
+      - name: Check disappearance and anonymous free status
+        id: detect
+        run: |
+          set -euo pipefail
+          : > /tmp/anomalies.txt
+          : > /tmp/unknown.txt
+          while IFS= read -r id; do
+            [ -z "$id" ] && continue
+            if ! grep -qxF -- "$id" /tmp/live.txt; then
+              printf '%s\t从 /v1/models 消失（疑似下线或改名）\n' "$id" >> /tmp/anomalies.txt
+              continue
+            fi
+
+            body=$(jq -cn --arg model "$id" '{model:$model,messages:[{role:"user",content:"hi"}],max_tokens:1}')
+            set +e
+            http=$(curl -sS --max-time 30 -o /tmp/probe.json -w '%{http_code}' \
+              -H "User-Agent: opencode/1.15.5" \
+              -H "x-opencode-client: cli" \
+              -H "x-opencode-session: ses_watch_${GITHUB_RUN_ID}" \
+              -H "x-opencode-request: msg_watch_${GITHUB_RUN_ID}" \
+              -H "Authorization: Bearer public" \
+              -H "Content-Type: application/json" \
+              -d "$body" \
+              "https://opencode.ai/zen/v1/chat/completions")
+            rc=$?
+            set -e
+            [ "$rc" -eq 0 ] || http=000
+            case "$http" in
+              200)
+                echo "$id -> FREE"
+                ;;
+              401|402|403)
+                printf '%s\t匿名探测 HTTP %s（疑似已转付费或无免费权限）\n' "$id" "$http" >> /tmp/anomalies.txt
+                ;;
+              429|500|502|503|504|000)
+                printf '%s\tUNKNOWN（探测 HTTP %s，不据此判定付费）\n' "$id" "$http" >> /tmp/unknown.txt
+                ;;
+              *)
+                printf '%s\t异常 HTTP %s，请人工核验\n' "$id" "$http" >> /tmp/anomalies.txt
+                ;;
+            esac
+          done < /tmp/curated.txt
+          echo "anomalies=$(grep -c . /tmp/anomalies.txt || true)" >> "$GITHUB_OUTPUT"
+          echo "unknown=$(grep -c . /tmp/unknown.txt || true)" >> "$GITHUB_OUTPUT"
+          echo "--- 异常 ---"
+          cat /tmp/anomalies.txt || true
+          echo "--- UNKNOWN（不告警） ---"
+          cat /tmp/unknown.txt || true
+
+      - name: Open or update maintenance issue
+        if: steps.detect.outputs.anomalies != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          title="⚠️ OpenCode Zen 免费模型目录漂移"
+          {
+            printf 'OpenCode Zen 免费模型巡检发现异常（%s）。\n\n' "$(date +%F)"
+            printf '| 模型 | 异常 |\n|---|---|\n'
+            while IFS="$(printf '\t')" read -r id msg; do
+              printf '| `%s` | %s |\n' "$id" "$msg"
+            done < /tmp/anomalies.txt
+            printf '\n运行时扩展会在启动后自动剔除下线或转付费模型；请确认后同步 `ZEN_FREE_MODELS`、README 和版本发布。\n'
+            printf '\n参考：\n- 目录：https://opencode.ai/zen/v1/models\n- 更新位置：`pi-cn-free-model-providers-ext.mjs`、README OpenCode Zen 小节\n'
+          } > /tmp/body.md
+          existing=$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number' | head -1 || true)
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body-file /tmp/body.md
+            echo "已更新现有 issue #$existing"
+          else
+            gh issue create --title "$title" --body-file /tmp/body.md
+          fi
