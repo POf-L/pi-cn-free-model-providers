@@ -22,10 +22,12 @@ opencode 客户端 -> 本代理(保留字段并替换身份值) -> https://openc
 
 import argparse
 import base64
+import errno
 import json
 import os
 import random
 import select
+import socket
 import ssl
 import string
 import sys
@@ -128,6 +130,54 @@ extra_headers = []
 upstream_timeout = 0
 # 向下游 SSE 心跳间隔(秒), 0 = 关闭
 sse_keepalive = 15
+# 上游错误日志始终开启; --verbose 额外打印每次请求的连接细节(对端/TLS/证书)
+verbose_log = False
+# 上游错误统计: (阶段, 异常类型) -> 累计次数
+error_stats = {}
+error_stats_lock = threading.Lock()
+# 上游瞬态错误(握手 alert/连接重置/远端提前断开等)自动重试次数, 0 = 不重试
+upstream_retries = 2
+
+
+def _is_retryable(err):
+    """判断上游错误是否值得重试: 握手/连接类瞬态错误重试, 证书类确定性错误不重试。"""
+    if isinstance(err, ssl.SSLCertVerificationError):
+        return False
+    if isinstance(err, (ssl.SSLError, ConnectionError, socket.timeout)):
+        return True
+    if isinstance(err, OSError):
+        return err.errno in (errno.ECONNRESET, errno.ECONNABORTED, errno.EPIPE,
+                             errno.ETIMEDOUT, errno.ECONNREFUSED, errno.EHOSTUNREACH,
+                             errno.ENETUNREACH)
+    return False
+
+
+def _conn_peer(conn):
+    """尽力获取连接对端信息: 地址、TLS 版本、证书签发组织; 拿不到则省略对应字段。"""
+    sock = getattr(conn, "sock", None)
+    if sock is None:
+        return None
+    try:
+        peer = sock.getpeername()
+        peer_str = f"{peer[0]}:{peer[1]}"
+    except OSError:
+        peer_str = "?"
+    try:
+        tls = sock.version() or "no-tls"
+    except Exception:
+        tls = "?"
+    issuer = None
+    try:
+        cert = sock.getpeercert()
+        if cert:
+            issuer = dict(x[0] for x in cert.get("issuer", []))
+            issuer = issuer.get("organizationName") or issuer.get("commonName")
+    except Exception:
+        pass
+    parts = [f"peer={peer_str}", f"tls={tls}"]
+    if issuer:
+        parts.append(f"issuer={issuer}")
+    return " ".join(parts)
 
 
 def _metadata_key(key):
@@ -270,23 +320,41 @@ class ZenProxyHandler(BaseHTTPRequestHandler):
                 _sanitize_request_body(obj, round_scope)
                 body = json.dumps(obj).encode()
 
-        conn = _upstream_connection()
-        try:
-            if os.environ.get("ZEN_PROXY_DEBUG"):
-                print(f"[debug] OUT {self.command} {upstream_path} headers={headers!r}", file=sys.stderr, flush=True)
-            conn.request(self.command, upstream_path, body=body if body else None, headers=headers)
-        except OSError as e:
-            return self._send_json(502, {"error": f"cannot reach upstream: {e}"})
-
         resp = None
-        try:
-            resp = conn.getresponse()
-        except (OSError, ValueError, IncompleteRead) as e:
+        conn = None
+        last_err = None
+        for attempt in range(upstream_retries + 1):
+            conn = _upstream_connection()
+            sent = False
             try:
-                conn.close()
-            except OSError:
-                pass
-            return self._send_json(502, {"error": f"upstream error: {e}"})
+                if verbose_log:
+                    conn.connect()
+                    print(f"[{time.strftime('%H:%M:%S')}] CONNECT {self.command} {upstream_path} "
+                          + (_conn_peer(conn) or "peer=?"), file=sys.stderr, flush=True)
+                if os.environ.get("ZEN_PROXY_DEBUG"):
+                    print(f"[debug] OUT {self.command} {upstream_path} headers={headers!r}", file=sys.stderr, flush=True)
+                conn.request(self.command, upstream_path, body=body if body else None, headers=headers)
+                sent = True
+                resp = conn.getresponse()
+            except (OSError, ValueError, IncompleteRead) as e:
+                last_err = e
+                phase = "response" if sent else ("connect" if verbose_log else "request")
+                self._log_upstream_error(phase, e, conn)
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                if not _is_retryable(e) or attempt >= upstream_retries:
+                    return self._send_json(502, {
+                        "error": (f"cannot reach upstream: {e}" if phase != "response"
+                                  else f"upstream error: {e}")})
+                print(f"[{time.strftime('%H:%M:%S')}] RETRY attempt={attempt + 1}/{upstream_retries} "
+                      + f"phase={phase} err={type(e).__name__}: {e}",
+                      file=sys.stderr, flush=True)
+                time.sleep(0.3 * (attempt + 1))
+            else:
+                break
+        assert resp is not None and conn is not None  # 循环必 break 或 return
         content_type = resp.getheader("Content-Type", "")
         self._log_status = resp.status
 
@@ -313,10 +381,11 @@ class ZenProxyHandler(BaseHTTPRequestHandler):
                 self.wfile.write(resp_body)
             except OSError:
                 pass
-        try:
-            conn.close()
-        except OSError:
-            pass
+        if conn is not None:
+            try:
+                conn.close()
+            except OSError:
+                pass
 
     def _stream_body(self, conn, resp):
         """透传 SSE 流。
@@ -415,6 +484,21 @@ class ZenProxyHandler(BaseHTTPRequestHandler):
                 parts.append(f"proj {project} -> {headers.get('x-opencode-project')}")
         parts.append(f"status={getattr(self, '_log_status', 'pending')}")
         print(" | ".join(parts), flush=True)
+
+    def _log_upstream_error(self, phase, err, conn):
+        """上游错误日志(始终开启): 阶段/异常类型/完整消息/对端信息/请求上下文/累计次数。"""
+        ts = time.strftime("%H:%M:%S")
+        kind = type(err).__name__
+        with error_stats_lock:
+            key = (phase, kind)
+            n = error_stats.get(key, 0) + 1
+            error_stats[key] = n
+        info = _conn_peer(conn)
+        print(f"[{ts}] UPSTREAM-ERROR phase={phase} err={kind}: {err}"
+              + (f" [{info}]" if info else "")
+              + f" req={self.command} {urllib.parse.urlsplit(self.path).path}"
+              + f" client={self.client_address[0]}:{self.client_address[1]}"
+              + f" occurrence={n}", file=sys.stderr, flush=True)
 
 
 def _get_system_proxy_from_registry():
@@ -519,6 +603,8 @@ def main():
                         help="do not sanitize identity values in request body")
     parser.add_argument("--quiet", action="store_true",
                         help="do not log per-request lines")
+    parser.add_argument("--verbose", action="store_true",
+                        help="log upstream connection details (peer address, TLS version, cert issuer) per request")
     parser.add_argument("--inject-client", default="cli",
                         help="x-opencode-client value to inject when missing (empty = disable)")
     parser.add_argument("--rotation", type=int, default=600,
@@ -533,11 +619,14 @@ def main():
                         help="upstream socket timeout in seconds (0 = never, avoid cutting long reasoning streams)")
     parser.add_argument("--keepalive", type=int, default=15,
                         help="send SSE keepalive comment to client every N idle seconds (0 = off)")
+    parser.add_argument("--retries", type=int, default=2,
+                        help="retries on transient upstream errors (TLS alert/conn reset/early close); 0 = no retry")
     args = parser.parse_args()
 
     global upstream_host, upstream_port, upstream_prefix, upstream_ssl
     global identity_mapper, rewrite_enabled, strip_headers, sanitize_body, quiet, inject_client, proxy_setting, extra_headers
-    global upstream_timeout, sse_keepalive
+    global upstream_timeout, sse_keepalive, verbose_log
+    global upstream_retries
     upstream_host = args.upstream_host
     upstream_port = args.upstream_port
     upstream_prefix = args.upstream_prefix
@@ -552,6 +641,8 @@ def main():
     extra_headers = args.extra_header
     upstream_timeout = args.timeout
     sse_keepalive = args.keepalive
+    verbose_log = args.verbose
+    upstream_retries = args.retries
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), ZenProxyHandler)
     print(f"MAIN STARTED port={args.port} pid={os.getpid()}", file=sys.stderr, flush=True)
@@ -562,6 +653,8 @@ def main():
     print(f"extra headers injected: {extra_headers or '(none)'}")
     print(f"rewritten headers: {sorted(DEFAULT_REWRITE_HEADERS)}")
     print(f"upstream read timeout: {upstream_timeout or 'none'}s, SSE keepalive: {sse_keepalive}s")
+    print(f"upstream error logging: on (peer/TLS detail included), verbose per-request connection log: {verbose_log}")
+    print(f"transient upstream error retries: {upstream_retries} (TLS alert / conn reset / early close)")
     proxy = _resolve_proxy()
     if proxy is None:
         print("upstream route: direct (no system proxy in use)")

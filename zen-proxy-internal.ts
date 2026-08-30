@@ -5,7 +5,6 @@ import net from "node:net"
 import type { Config, Plugin } from "@opencode-ai/plugin"
 
 const OFFICIAL_PROVIDER_ID = "opencode"
-const PROXY_PROVIDER_ID = "zenproxy"
 const HOST = "127.0.0.1"
 const PORT = (() => {
   const value = Number(process.env.ZEN_PROXY_PORT)
@@ -26,8 +25,9 @@ function log(message: string) {
   } catch {}
 }
 
+// 只接管 opencode 官方渠道；其他自定义渠道（codex-relay / baipiao 等）完全不碰
 function isProxyProvider(providerID: string): boolean {
-  return providerID === OFFICIAL_PROVIDER_ID || providerID === PROXY_PROVIDER_ID
+  return providerID === OFFICIAL_PROVIDER_ID
 }
 
 function headerKey(headers: Record<string, string>, name: string): string | undefined {
@@ -109,7 +109,8 @@ async function isNonZenHttpOccupant(): Promise<boolean> {
 }
 
 function proxyArguments(): string[] {
-  const args = ["-I", "-B", "-u", SCRIPT_PATH, "--port", String(PORT), "--rotation", "0"]
+  const args = ["-I", "-B", "-u", SCRIPT_PATH, "--port", String(PORT), "--rotation", "0", "--retries", process.env.ZEN_PROXY_RETRIES ?? "2"]
+  if (process.env.ZEN_PROXY_VERBOSE === "1" || process.env.ZEN_PROXY_VERBOSE === "true") args.push("--verbose")
   const upstream = process.env.ZEN_PROXY_UPSTREAM_URL
   if (!upstream) return args
 
@@ -210,21 +211,13 @@ function ensureZenProxy(): Promise<void> {
   return ensurePromise
 }
 
-function configureProxyProvider(config: Config, providerID: string) {
-  const provider = config.provider?.[providerID]
-  if (!provider) return
-  provider.options ??= {}
-  provider.options.baseURL = PROXY_BASE_URL
-  provider.options.timeout = false
-}
-
 function configureProviders(config: Config) {
   config.provider ??= {}
+  // 仅改写官方渠道的 baseURL/timeout，不新建也不修改任何其他 provider
   const official = (config.provider[OFFICIAL_PROVIDER_ID] ??= {})
   official.options ??= {}
   official.options.baseURL = PROXY_BASE_URL
   official.options.timeout = false
-  configureProxyProvider(config, PROXY_PROVIDER_ID)
 }
 
 export default (async () => {
