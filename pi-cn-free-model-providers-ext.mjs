@@ -196,15 +196,21 @@ function normalizeTools(tools) {
 
 // ── SSE parsing ──
 function processDelta(state, delta) {
-  if (delta.reasoning_content) {
+  // Most OpenAI-compatible gateways stream thinking as `reasoning_content`, but
+  // SenseNova's gateway uses a bare `reasoning` field (verified against
+  // https://token.sensenova.cn/v1 — every delta for sensenova-6.8-flash-lite
+  // carries only `reasoning`). Reading just one name silently drops the thinking
+  // stream for that provider even though its models declare `reasoning: true`.
+  const reasoningDelta = delta.reasoning_content || delta.reasoning;
+  if (reasoningDelta) {
     if (state.thinkingBlockIndex === -1) {
       state.thinkingBlockIndex = state.output.content.length;
       state.output.content.push({ type: "thinking", thinking: "" });
       state.stream.push({ type: "thinking_start", contentIndex: state.thinkingBlockIndex, partial: state.output });
     }
     const block = state.output.content[state.thinkingBlockIndex];
-    block.thinking += delta.reasoning_content;
-    state.stream.push({ type: "thinking_delta", contentIndex: state.thinkingBlockIndex, delta: delta.reasoning_content, partial: state.output });
+    block.thinking += reasoningDelta;
+    state.stream.push({ type: "thinking_delta", contentIndex: state.thinkingBlockIndex, delta: reasoningDelta, partial: state.output });
   }
   if (delta.content) {
     if (state.thinkingBlockIndex !== -1) {
