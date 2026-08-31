@@ -92,6 +92,11 @@ const OPENCODE_STATIC_HEADERS = {
   "User-Agent": "opencode/1.15.5",
   "x-opencode-client": "cli",
 };
+// Every Zen call goes through one place so a local relay can be substituted.
+// `OPENCODE_ZEN_BASE_URL` exists because the gateway refuses some models with
+// `RegionError` depending on the caller's identity/region; users who front it
+// with their own proxy previously had no way to point this extension at it.
+const ZEN_BASE_URL = (process.env.OPENCODE_ZEN_BASE_URL ?? "https://opencode.ai/zen/v1").replace(/\/+$/, "");
 
 // ── Message / tool normalization ──
 function getContentText(msg) {
@@ -109,10 +114,23 @@ function getContentText(msg) {
 }
 function normalizeMessages(messages) {
   const out = [];
+  // Assistant turns that failed or were aborted are dropped below. Their tool
+  // results must go with them: a `role: "tool"` whose tool_call_id is declared
+  // by no surviving assistant message is an orphan, and strict
+  // OpenAI-compatible gateways reject the request outright. Collect the ids of
+  // the dropped calls so the matching results are skipped too.
+  const orphanedToolCallIds = new Set();
   for (const m of messages ?? []) {
     if (!m || typeof m !== "object") continue;
     // Skip failed assistant turns
-    if (m.role === "assistant" && (m.stopReason === "error" || m.stopReason === "aborted")) continue;
+    if (m.role === "assistant" && (m.stopReason === "error" || m.stopReason === "aborted")) {
+      if (Array.isArray(m.content)) {
+        for (const block of m.content) {
+          if (block?.type === "toolCall" && block.id) orphanedToolCallIds.add(block.id);
+        }
+      }
+      continue;
+    }
     if (m.role === "developer") {
       out.push({ role: "system", content: getContentText(m) });
     } else if (m.role === "user") {
@@ -169,6 +187,7 @@ function normalizeMessages(messages) {
       if (toolCalls.length > 0) mapped.tool_calls = toolCalls;
       out.push(mapped);
     } else if (m.role === "toolResult") {
+      if (orphanedToolCallIds.has(m.toolCallId)) continue;
       out.push({ role: "tool", tool_call_id: m.toolCallId, content: getContentText(m) });
     }
     // drop anything else
@@ -233,15 +252,21 @@ function processDelta(state, delta) {
       const t = state.toolCallsState[idx];
       if (tc.id) t.id = tc.id;
       if (tc.function?.name) t.name = tc.function.name;
+      // Open the block as soon as the call is announced rather than on its first
+      // argument chunk. Waiting loses calls that carry no arguments at all
+      // (`arguments: ""` is falsy), and it froze id/name at whatever had
+      // arrived by then — gateways are free to send the id afterwards.
+      if (!t.emittedStart && (t.id || t.name)) {
+        t.emittedStart = true;
+        t.contentIndex = state.output.content.length;
+        state.output.content.push({ type: "toolCall", id: t.id, name: t.name, arguments: {} });
+        state.stream.push({ type: "toolcall_start", contentIndex: t.contentIndex, partial: state.output });
+      }
       if (tc.function?.arguments) {
         t.arguments += tc.function.arguments;
-        if (!t.emittedStart) {
-          t.emittedStart = true;
-          t.contentIndex = state.output.content.length;
-          state.output.content.push({ type: "toolCall", id: t.id, name: t.name, arguments: {} });
-          state.stream.push({ type: "toolcall_start", contentIndex: t.contentIndex, partial: state.output });
+        if (t.emittedStart) {
+          state.stream.push({ type: "toolcall_delta", contentIndex: t.contentIndex, delta: tc.function.arguments, partial: state.output });
         }
-        state.stream.push({ type: "toolcall_delta", contentIndex: t.contentIndex, delta: tc.function.arguments, partial: state.output });
       }
     }
   }
@@ -251,7 +276,13 @@ function finalizeToolCalls(state) {
     if (t?.emittedStart) {
       let args = {};
       try { args = JSON.parse(t.arguments || "{}"); } catch {}
-      state.output.content[t.contentIndex].arguments = args;
+      // Re-write id/name as well: they may have arrived after the block was
+      // opened, and a block left with an empty id can never be matched to its
+      // tool result.
+      const block = state.output.content[t.contentIndex];
+      block.id = t.id;
+      block.name = t.name;
+      block.arguments = args;
       state.stream.push({
         type: "toolcall_end",
         contentIndex: t.contentIndex,
@@ -835,9 +866,15 @@ function makeOpenAIStream(baseUrl, envKey, opts = {}) {
   return function streamSimple(model, context, options) {
     const stream = new AssistantMessageEventStream();
     const output = makeOutput(model);
-    const maxTokens = typeof opts.maxTokens === "function" ? opts.maxTokens(model) : (opts.maxTokens ?? 128000);
+    // Fall back to the model's own registered limit rather than a flat 128000:
+    // `run` now treats this value as a ceiling, so a provider-wide constant
+    // would cap large models below what they actually accept.
+    const maxTokens = typeof opts.maxTokens === "function"
+      ? opts.maxTokens(model)
+      : (opts.maxTokens ?? model.maxTokens ?? 128000);
     const cfg = {
       url: `${baseUrl.replace(/\/+$/, "")}/chat/completions`,
+      envKey,
       key: () => process.env[envKey] ?? (options?.apiKey && options.apiKey !== "public" ? options.apiKey : undefined),
       headers: () => ({}),
       maxTokens,
@@ -854,7 +891,8 @@ function streamOpenCode(model, context, options) {
   const stream = new AssistantMessageEventStream();
   const output = makeOutput(model);
   run(stream, output, model, context, options, {
-    url: "https://opencode.ai/zen/v1/chat/completions",
+    url: `${ZEN_BASE_URL}/chat/completions`,
+    envKey: "OPENCODE_API_KEY",
     key: () => process.env.OPENCODE_API_KEY
       ?? (options?.apiKey && options.apiKey !== "public" ? options.apiKey : "public"),
     headers: () => ({
@@ -862,7 +900,7 @@ function streamOpenCode(model, context, options) {
       "x-opencode-session": SESSION_ID,
       "x-opencode-request": generateOpenCodeId("msg_"),
     }),
-    maxTokens: 128000,
+    maxTokens: model.maxTokens ?? 128000,
   });
   return stream;
 }
@@ -870,9 +908,13 @@ function streamOpenCode(model, context, options) {
 // SenseNova (商汤日日新) — OpenAI-compatible gateway with a strict schema.
 // https://platform.sensenova.cn/docs — only listed fields are accepted;
 // response_format is rejected, multiple system messages must be merged,
-// assistant.content:null must be dropped, max_tokens <= 65536.
+// assistant.content:null must be dropped, and max_tokens is validated against
+// a PER-MODEL ceiling (verified: sensenova-6.8-flash-lite rejects 65537 with
+// "should be in [1, 65536]" while glm-5.2 accepts 131072 and rejects 131073).
+// A single provider-wide 65536 both failed the small models on overrides and
+// halved glm-5.2, so defer to each model's registered limit.
 const streamSenseNovaChat = makeOpenAIStream("https://token.sensenova.cn/v1", "SENSENOVA_API_KEY", {
-  maxTokens: 65536,
+  maxTokens: (model) => model.maxTokens ?? 65536,
   cleanBody: (body) => {
     const msgs = body.messages ?? [];
     const merged = [];
@@ -984,13 +1026,19 @@ async function run(stream, output, model, context, options, cfg) {
       ...normalizeMessages(context.messages ?? []),
     ];
     const tools = normalizeTools(context.tools);
+    // cfg.maxTokens is a hard upstream ceiling, not just a default: SenseNova
+    // validates it per model and answers 400 "field MaxTokens invalid, should be
+    // in [1, N]". Letting options.maxTokens override it unclamped turned any
+    // session-level bump into a failed request.
+    const cap = cfg.maxTokens;
+    const maxTokens = Math.max(1, Math.min(options?.maxTokens ?? cap, cap));
     let body = {
       model: model.id,
       messages,
       stream: true,
       stream_options: { include_usage: true },
       ...(tools && tools.length > 0 ? { tools } : {}),
-      ...(options?.maxTokens ? { max_tokens: options.maxTokens } : { max_tokens: cfg.maxTokens }),
+      max_tokens: maxTokens,
     };
     if (cfg.cleanBody) body = cfg.cleanBody(body);
     // Thinking mode for providers that opt in via a gateway extension field
@@ -999,10 +1047,20 @@ async function run(stream, output, model, context, options, cfg) {
     if (cfg.enableThinking && options?.thinkingLevel && options.thinkingLevel !== "off") {
       body.chat_template_kwargs = { enable_thinking: true };
     }
+    const apiKey = cfg.key();
+    // Template-interpolating a missing key produced the literal header
+    // `Bearer undefined`, which upstream answers with an opaque 401. Fail with
+    // the name of the variable the user actually has to set instead.
+    if (!apiKey) {
+      throw new Error(
+        `${model.provider} requires an API key: set ${cfg.envKey ?? "the provider's API key env var"} ` +
+        `or store a key for this provider (pi auth), then retry.`,
+      );
+    }
     const headers = {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
-      Authorization: `Bearer ${cfg.key()}`,
+      Authorization: `Bearer ${apiKey}`,
       ...(cfg.headers ? cfg.headers() : {}),
     };
     stream.push({ type: "start", partial: output });
@@ -1020,7 +1078,10 @@ async function run(stream, output, model, context, options, cfg) {
     const reader = response.body.getReader();
     await consumeSSEStream(state, reader);
     finalizeToolCalls(state);
-    if (state.toolCallsState.length > 0) output.stopReason = "toolUse";
+    // Only claim a tool-use stop when a tool-call block actually made it into
+    // the output. A state entry that never opened its block would otherwise
+    // leave pi waiting for a tool result that does not exist.
+    if (state.toolCallsState.some((t) => t?.emittedStart)) output.stopReason = "toolUse";
     else if (!output.stopReason || output.stopReason === "stop") output.stopReason = "stop";
     stream.push({ type: "done", reason: output.stopReason, message: output });
     stream.end();
@@ -1600,9 +1661,16 @@ const CLOUDFLARE_MODELS = [
 // Fetch complete model objects from a provider's /v1/models. The live payload
 // is retained so capability metadata (modalities/features/supports_*) is not
 // lost while doing drift detection.
-async function fetchLiveModels(url, headers) {
+// Combine a per-request timeout with the caller's overall deadline so the
+// background pass can actually be bounded end to end.
+function boundedSignal(timeoutMs, outer) {
+  const own = AbortSignal.timeout(timeoutMs);
+  return outer ? AbortSignal.any([own, outer]) : own;
+}
+
+async function fetchLiveModels(url, headers, signal) {
   try {
-    const res = await fetch(url, { headers, signal: AbortSignal.timeout(8000) });
+    const res = await fetch(url, { headers, signal: boundedSignal(8000, signal) });
     if (!res.ok) return null;
     const json = await res.json();
     const data = Array.isArray(json) ? json : json?.data;
@@ -1613,8 +1681,8 @@ async function fetchLiveModels(url, headers) {
   }
 }
 
-async function fetchLiveModelIds(url, headers) {
-  const models = await fetchLiveModels(url, headers);
+async function fetchLiveModelIds(url, headers, signal) {
+  const models = await fetchLiveModels(url, headers, signal);
   return models ? new Set(models.map((model) => model.id ?? model.name).filter(Boolean)) : null;
 }
 
@@ -1636,8 +1704,8 @@ function mergeLiveModel(curated, live) {
 
 // Keep the curated allowlist for safety, but return each retained model with
 // its complete upstream metadata instead of reducing /v1/models to IDs.
-async function filterToLive(curated, url, headers) {
-  const liveModels = await fetchLiveModels(url, headers);
+async function filterToLive(curated, url, headers, signal) {
+  const liveModels = await fetchLiveModels(url, headers, signal);
   if (!liveModels) return curated;
   const byId = new Map(liveModels.map((model) => [model.id ?? model.name, model]));
   const kept = curated
@@ -1653,37 +1721,60 @@ async function filterToLive(curated, url, headers) {
 // it during auth (401/402/403) before any tokens are billed. When a real
 // OPENCODE_API_KEY is set, the response's `cost` field must be zero instead —
 // paid models then succeed but report non-zero cost.
-// Returns "free" (verified), "paid" (verified not free), or "unknown"
-// (network/shape errors — callers must keep the model rather than drop it,
-// so a transient outage never wipes the list).
-async function probeFreeStatus(modelId) {
+// Returns { status, api } where status is "free" (verified), "paid" (verified
+// not free), or "unknown" (network/shape errors — callers must keep the model
+// rather than drop it, so a transient outage never wipes the list). `api` is
+// the endpoint the model actually answered on.
+//
+// Some Zen models are Responses-API only: muse-spark-1.2-contributor-free
+// answers 500 on /chat/completions and 200 with cost "0" on /responses. Probing
+// only chat completions classified those as "unknown" forever, so they could
+// never enter the list even though they are free and usable.
+async function probeFreeStatus(modelId, signal) {
   const apiKey = process.env.OPENCODE_API_KEY;
-  let res;
-  try {
-    res = await fetch("https://opencode.ai/zen/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...OPENCODE_STATIC_HEADERS,
-        "x-opencode-session": SESSION_ID,
-        "x-opencode-request": generateOpenCodeId("msg_"),
-        Authorization: `Bearer ${apiKey ?? "public"}`,
-      },
-      body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
-      signal: AbortSignal.timeout(20000),
-    });
-  } catch {
-    return "unknown";
-  }
-  if (!res.ok) {
-    // Auth/billing rejection = verified not free. Anything else (5xx, rate
-    // limit) says nothing about pricing — treat as unknown.
-    return [401, 402, 403].includes(res.status) ? "paid" : "unknown";
-  }
-  let json;
-  try { json = await res.json(); } catch { return "unknown"; }
-  if (apiKey) return Number(json?.cost ?? 0) === 0 ? "free" : "paid";
-  return "free";
+  const headers = () => ({
+    "Content-Type": "application/json",
+    ...OPENCODE_STATIC_HEADERS,
+    "x-opencode-session": SESSION_ID,
+    "x-opencode-request": generateOpenCodeId("msg_"),
+    Authorization: `Bearer ${apiKey ?? "public"}`,
+  });
+  const attempt = async (path, body) => {
+    let res;
+    try {
+      res = await fetch(`${ZEN_BASE_URL}${path}`, {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify(body),
+        signal: boundedSignal(20000, signal),
+      });
+    } catch {
+      return "unknown";
+    }
+    if (!res.ok) {
+      // Auth/billing rejection = verified not free. Anything else (5xx, rate
+      // limit) says nothing about pricing — treat as unknown.
+      return [401, 402, 403].includes(res.status) ? "paid" : "unknown";
+    }
+    let json;
+    try { json = await res.json(); } catch { return "unknown"; }
+    if (apiKey) return Number(json?.cost ?? 0) === 0 ? "free" : "paid";
+    return "free";
+  };
+
+  const chat = await attempt("/chat/completions", {
+    model: modelId,
+    messages: [{ role: "user", content: "hi" }],
+    max_tokens: 1,
+  });
+  if (chat !== "unknown") return { status: chat, api: "openai-completions" };
+
+  // Only retry on the other transport when chat completions was inconclusive:
+  // a verified "paid" or "free" answer already settles it, and a second call
+  // would bill a second token.
+  const responses = await attempt("/responses", { model: modelId, input: "hi" });
+  if (responses !== "unknown") return { status: responses, api: "openai-responses" };
+  return { status: "unknown", api: "openai-completions" };
 }
 // Run async fn over items with bounded concurrency.
 async function mapLimit(items, limit, fn) {
@@ -1698,11 +1789,11 @@ async function mapLimit(items, limit, fn) {
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
   return results;
 }
-function makeDiscoveredModel(id) {
+function makeDiscoveredModel(id, api = "openai-completions") {
   return {
     id,
     name: id,
-    api: "openai-completions",
+    api,
     reasoning: true,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -1716,14 +1807,20 @@ function makeDiscoveredModel(id) {
 // are dropped exactly like renamed/removed ones. If nothing verifies free
 // (e.g. probes all failed), fall back to the curated ∩ live intersection so a
 // gateway outage never empties the provider.
-async function verifyZenModels(liveIds) {
+async function verifyZenModels(liveIds, signal) {
   const known = new Map(ZEN_FREE_MODELS.map((m) => [m.id, m]));
   const ids = [...liveIds];
-  const statuses = await mapLimit(ids, 8, probeFreeStatus);
+  const probes = await mapLimit(ids, 8, (id) => probeFreeStatus(id, signal));
   const verified = [];
   for (let i = 0; i < ids.length; i++) {
-    if (statuses[i] !== "free") continue;
-    verified.push(known.get(ids[i]) ?? makeDiscoveredModel(ids[i]));
+    const probe = probes[i];
+    if (probe?.status !== "free") continue;
+    const curated = known.get(ids[i]);
+    // A model that only answers on /responses must be registered with that
+    // api, otherwise the chat-completions transport is used at runtime and
+    // every request fails.
+    if (curated) verified.push(probe.api === curated.api ? curated : { ...curated, api: probe.api });
+    else verified.push(makeDiscoveredModel(ids[i], probe.api));
   }
   if (verified.length) return verified;
   const kept = ZEN_FREE_MODELS.filter((m) => liveIds.has(m.id));
@@ -1752,7 +1849,16 @@ function saveCache(models) {
   try {
     const dir = dirname(OPENCODE_CACHE_FILE);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(OPENCODE_CACHE_FILE, JSON.stringify({ timestamp: Date.now(), ...models }));
+    // Drop the derived fields before writing. `opencodeLiveModel` holds the
+    // entire upstream /v1/models object for every model, which bloated the
+    // cache for no benefit, and `capabilities` is recomputed on load anyway.
+    const slim = {};
+    for (const [key, list] of Object.entries(models)) {
+      slim[key] = Array.isArray(list)
+        ? list.map(({ opencodeLiveModel: _live, capabilities: _caps, ...rest }) => rest)
+        : list;
+    }
+    writeFileSync(OPENCODE_CACHE_FILE, JSON.stringify({ timestamp: Date.now(), ...slim }));
   } catch {
     // best-effort; the cache is an optimization, never required
   }
@@ -1852,8 +1958,13 @@ function registerAll(pi, m) {
   pi.registerProvider("opencode-zen", {
     name: "OpenCode Zen (native headers)",
     apiKey: "public",
-    baseUrl: "https://opencode.ai/zen/v1",
+    baseUrl: ZEN_BASE_URL,
     api: "openai-completions",
+    // Responses-API-only models carry api: "openai-responses", which pi routes
+    // through its own transport instead of streamSimple. Declare the OpenCode
+    // identity headers at provider level so that path is not treated as a
+    // generic client and rate-limited.
+    headers: { ...OPENCODE_STATIC_HEADERS },
     streamSimple: streamOpenCode,
     models: m.zen,
   });
@@ -2095,20 +2206,23 @@ function registerCapabilitiesCommand(pi) {
 // registered (curated or cached) models untouched, so the user is never blocked.
 async function verifyAndUpdateModels(pi) {
   // Overall safety net so a pathological network can never strand this task.
+  // This must be threaded into every request: with 60+ Zen models probed 8 at a
+  // time at 20s each, per-request timeouts alone allowed the pass to run for
+  // minutes.
   const signal = AbortSignal.timeout(45000);
   const zenHeaders = {
     ...OPENCODE_STATIC_HEADERS,
     Authorization: `Bearer ${process.env.OPENCODE_API_KEY ?? "public"}`,
   };
   const [zenLive, sensenovaModels, siliconflowModels, modelscopeModels, nvidiaModels, agnesModels] = await Promise.all([
-    fetchLiveModelIds("https://opencode.ai/zen/v1/models", zenHeaders),
-    filterToLive(SENSENOVA_MODELS, "https://token.sensenova.cn/v1/models", authHeader("SENSENOVA_API_KEY")),
-    filterToLive(SILICONFLOW_MODELS, "https://api.siliconflow.cn/v1/models", authHeader("SILICONFLOW_API_KEY")),
-    filterToLive(MODELSCOPE_MODELS, "https://api-inference.modelscope.cn/v1/models", authHeader("MODELSCOPE_API_KEY")),
-    filterToLive(NVIDIA_MODELS, "https://integrate.api.nvidia.com/v1/models", authHeader("NVIDIA_NIM_API_KEY")),
-    filterToLive(AGNES_MODELS, "https://apihub.agnes-ai.com/v1/models", authHeader("AGNES_API_KEY")),
+    fetchLiveModelIds(`${ZEN_BASE_URL}/models`, zenHeaders, signal),
+    filterToLive(SENSENOVA_MODELS, "https://token.sensenova.cn/v1/models", authHeader("SENSENOVA_API_KEY"), signal),
+    filterToLive(SILICONFLOW_MODELS, "https://api.siliconflow.cn/v1/models", authHeader("SILICONFLOW_API_KEY"), signal),
+    filterToLive(MODELSCOPE_MODELS, "https://api-inference.modelscope.cn/v1/models", authHeader("MODELSCOPE_API_KEY"), signal),
+    filterToLive(NVIDIA_MODELS, "https://integrate.api.nvidia.com/v1/models", authHeader("NVIDIA_NIM_API_KEY"), signal),
+    filterToLive(AGNES_MODELS, "https://apihub.agnes-ai.com/v1/models", authHeader("AGNES_API_KEY"), signal),
   ]);
-  const zenModels = zenLive ? await verifyZenModels(zenLive) : ZEN_FREE_MODELS;
+  const zenModels = zenLive ? await verifyZenModels(zenLive, signal) : ZEN_FREE_MODELS;
   const verified = {
     zen: zenModels,
     sensenova: sensenovaModels,
