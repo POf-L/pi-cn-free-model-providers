@@ -1205,6 +1205,20 @@ const AGNES_MODELS = [
 // that switched to paid are dropped despite being whitelisted.
 const ZEN_FREE_MODELS = [
   {
+    // Responses-API only: /chat/completions answers 500 for this model while
+    // /responses answers 200 with cost "0". Metadata verified against the
+    // gateway: max_output_tokens 131073 is accepted and 1048577 is rejected
+    // upstream, and image parts are accepted without error.
+    id: "muse-spark-1.2-contributor-free",
+    name: "Muse Spark 1.2 Free",
+    api: "openai-responses",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 1048576,
+    maxTokens: 131072,
+  },
+  {
     id: "mimo-v2.5-free",
     name: "MiMo-V2.5 Free",
     api: "openai-completions",
