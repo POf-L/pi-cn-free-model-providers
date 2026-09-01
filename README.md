@@ -132,15 +132,17 @@ pi --model opencode-zen/big-pickle
 
 实时探测结果（2026-09-01，经本地 relay 直连 Zen 网关核验，全部 `cost: 0`）：
 
-| 模型 ID | 说明 | 上下文 | 输出上限 |
-|---|---|---|---|
-| `muse-spark-1.2-contributor-free` | 仅 Responses API（`/chat/completions` 返回 500），文本+图像 | 1M | 131,072 |
-| `big-pickle` | 匿名 stealth 模型（社区确认底层≈DeepSeek V4 Flash） | 200K | 131,072 |
-| `mimo-v2.5-free` | 多模态系列的文本档 | 200K | 131,072 |
-| `ling-3.0-flash-fin-free` | 新上线免费模型（替代已下线的 `hy3-free`） | 256K | 65,536 |
-| `laguna-s-2.1-free` | 长时程 agent 编码 | 256K | 131,072 |
-| `nemotron-3-ultra-free` | 超长上下文（1M） | 1M | 131,072 |
-| `nemotron-3.5-lightning-free` | 高速执行 | 1M | 131,072 |
+| 模型 ID | 说明 | 上下文 | 输出上限 | 思考档位 |
+|---|---|---|---|---|
+| `muse-spark-1.2-contributor-free` | 仅 Responses API（`/chat/completions` 返回 500），文本+图像 | 1M | 131,072 | 到 `xhigh` |
+| `big-pickle` | 匿名 stealth 模型（社区确认底层≈DeepSeek V4 Flash） | 200K | 131,072 | 不接受 effort 字段 |
+| `mimo-v2.5-free` | 多模态系列的文本档 | 200K | 131,072 | 不接受 effort 字段 |
+| `ling-3.0-flash-fin-free` | 新上线免费模型（替代已下线的 `hy3-free`） | 256K | 65,536 | 到 `max` |
+| `laguna-s-2.1-free` | 长时程 agent 编码 | 256K | 131,072 | 到 `max` |
+| `nemotron-3-ultra-free` | 超长上下文（1M） | 1M | 131,072 | 到 `max` |
+| `nemotron-3.5-lightning-free` | 高速执行 | 1M | 131,072 | 到 `max` |
+
+> 🧠 **思考档位**：pi 默认只暴露 `off/minimal/low/medium/high`，`xhigh` 与 `max` 必须由模型在 `thinkingLevelMap` 里显式声明才会出现在 `/think` 里。Zen 的 `/chat/completions` 在拒绝非法值时会报出完整枚举 `none|minimal|low|medium|high|xhigh|max`，`/responses`（muse-spark）则是 `none|minimal|low|medium|high|xhigh`（无 `max`），白名单按此逐模型标注。`mimo-v2.5-free` 与 `big-pickle` 对任何 `reasoning_effort`（包括合法值）都回 400 `Invalid request parameters`，只有省略该字段才能工作，因此它们不声明 `thinkingLevelMap`，插件也不会给它们发这个字段。
 
 > 下线/不可用：`hy3-free` 已从 `/v1/models` 消失，调用返回 `Model hy3-free is not supported`，已移出白名单。`deepseek-v4-flash-free` 仍在目录里但调用返回 `Model is unavailable.`，因此不收录。`x-preview-f-free`（Ox Alpha）此前已转付费并移除。
 >
@@ -307,6 +309,8 @@ opencode 原生方式不经过 `cleanBody`，但实测标准对话/工具调用�
 14. **探测有 6 小时缓存**：每次校验要对约 60 个 Zen 模型各发一个请求，而免费额度是全体匿名用户共享的，每次启动 pi 都重跑等于把额度花在探测上。因此磁盘缓存在 6 小时内视为新鲜，直接跳过后台校验；需要立刻重跑用 `/model-refresh`。
 
 15. **本地 relay 冷启动重试**：若 `OPENCODE_ZEN_BASE_URL` 指向本机 relay（绕区域门的方案），relay 可能还在启动中，此时目录拉取会失败并导致整轮 Zen 校验被跳过。对 loopback 地址会重试 5 次（间隔 2s）；远端网关不重试（那里的 5xx 是真故障）。
+
+16. **缓存按字段合并，不整条替换**：加载磁盘缓存时，缓存里有的字段仍然优先（校验过的 `api`、探测出的 token 上限不能被静态值覆盖），但缓存里**没有**的字段回落到白名单。以前是整条缓存对象替换白名单条目，于是给白名单新加一个字段（`thinkingLevelMap` 就是暴露这个问题的那次）在缓存过期前完全不生效。
 
 ## 命令
 

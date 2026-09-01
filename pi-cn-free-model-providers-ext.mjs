@@ -569,6 +569,17 @@ async function run(stream, output, model, context, options, cfg) {
       max_tokens: maxTokens,
     };
     if (cfg.cleanBody) body = cfg.cleanBody(body);
+    // pi hands the selected thinking level to streamSimple as `options.reasoning`
+    // (a level name from off|minimal|low|medium|high|xhigh|max). Forward it as
+    // reasoning_effort, translated through the model's thinkingLevelMap, so the
+    // /think selection actually reaches the gateway instead of being dropped.
+    // Only models that declare a map get the field — the ones that reject it
+    // outright (mimo-v2.5-free, big-pickle) must not receive it at all.
+    const level = options?.reasoning ?? options?.thinkingLevel;
+    if (model.thinkingLevelMap && typeof level === "string") {
+      const effort = model.thinkingLevelMap[level] ?? level;
+      if (effort) body.reasoning_effort = effort;
+    }
     // Thinking mode for providers that opt in via a gateway extension field
     // (chat_template_kwargs.enable_thinking). pi signals the requested level
     // through options.thinkingLevel.
@@ -629,6 +640,16 @@ async function run(stream, output, model, context, options, cfg) {
 // additionally probe-verified as free at load (see verifyZenModels): unknown
 // free models are auto-added with conservative metadata, and curated entries
 // that switched to paid are dropped despite being whitelisted.
+// Zen's /chat/completions names its effort enum when a value is rejected:
+// none|minimal|low|medium|high|xhigh|max. pi only offers xhigh/max when a model
+// declares them (see getSupportedThinkingLevels), and it has no "off" wire value
+// of its own on this transport, so map that to the gateway's "none".
+// NOT every Zen model takes the field: mimo-v2.5-free and big-pickle answer 400
+// "Invalid request parameters" for any reasoning_effort (including valid ones)
+// and work only when it is omitted, so they deliberately carry no map — `run`
+// keys the field's presence off thinkingLevelMap.
+const ZEN_CHAT_THINKING_LEVELS = { off: "none", xhigh: "xhigh", max: "max" };
+
 const ZEN_FREE_MODELS = [
   {
     // Responses-API only: /chat/completions answers 500 for this model while
@@ -641,6 +662,13 @@ const ZEN_FREE_MODELS = [
     name: "Muse Spark 1.2 Free",
     api: "openai-responses",
     reasoning: true,
+    // pi hides the xhigh/max thinking levels unless the model names them in
+    // thinkingLevelMap (getSupportedThinkingLevels treats those two as opt-in),
+    // so without this the gateway's highest effort was unreachable from /think.
+    // /responses accepts none|minimal|low|medium|high|xhigh for this model and
+    // rejects max, so only xhigh is declared; pi sends the "off" level as
+    // reasoning.effort "none" on its own.
+    thinkingLevelMap: { xhigh: "xhigh" },
     input: ["text", "image"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 1048576,
@@ -670,6 +698,7 @@ const ZEN_FREE_MODELS = [
     name: "Ling 3.0 Flash Fin Free",
     api: "openai-completions",
     reasoning: true,
+    thinkingLevelMap: ZEN_CHAT_THINKING_LEVELS,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 262144,
@@ -682,6 +711,7 @@ const ZEN_FREE_MODELS = [
     name: "Laguna S 2.1 Free",
     api: "openai-completions",
     reasoning: true,
+    thinkingLevelMap: ZEN_CHAT_THINKING_LEVELS,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 262144,
@@ -695,6 +725,7 @@ const ZEN_FREE_MODELS = [
     name: "Nemotron 3 Ultra Free",
     api: "openai-completions",
     reasoning: true,
+    thinkingLevelMap: ZEN_CHAT_THINKING_LEVELS,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 1000000,
@@ -705,6 +736,7 @@ const ZEN_FREE_MODELS = [
     name: "Nemotron 3.5 Lightning Free",
     api: "openai-completions",
     reasoning: true,
+    thinkingLevelMap: ZEN_CHAT_THINKING_LEVELS,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 1000000,
@@ -1240,13 +1272,27 @@ function curatedModels() {
   };
 }
 
+// Cached entries win field-by-field (the verify pass corrects `api` and the
+// token limits from live probes), but fields the cache has never heard of fall
+// back to the curated entry. Without this, adding a key to the allowlist —
+// thinkingLevelMap was the case that exposed it — stayed invisible until the
+// cache aged out, because a whole cached model object replaced the curated one.
+function mergeCachedList(cached, curated) {
+  if (!Array.isArray(cached)) return curated;
+  const byId = new Map(curated.map((model) => [model.id, model]));
+  return cached.map((model) => {
+    const base = byId.get(model.id);
+    return base ? { ...base, ...model } : model;
+  });
+}
+
 function initialModels() {
   const cache = loadCache();
   if (!cache) return curatedModels();
   const curated = curatedModels();
   return {
-    zen: cache.zen ?? curated.zen,
-    sensenova: cache.sensenova ?? curated.sensenova,
+    zen: mergeCachedList(cache.zen, curated.zen),
+    sensenova: mergeCachedList(cache.sensenova, curated.sensenova),
   };
 }
 
