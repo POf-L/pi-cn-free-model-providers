@@ -1700,18 +1700,82 @@ async function fetchLiveModelIds(url, headers, signal) {
   return models ? new Set(models.map((model) => model.id ?? model.name).filter(Boolean)) : null;
 }
 
-function authHeader(envKey) {
-  return { Authorization: `Bearer ${process.env[envKey] ?? "public"}` };
+// pi keeps provider keys in <agentDir>/auth.json (written by `pi auth`), not in
+// the environment. An env-only lookup therefore fell back to `Bearer public`,
+// every authenticated /v1/models call answered 401, fetchLiveModels returned
+// null and filterToLive silently handed back the curated list — which is why
+// live metadata was never adopted and drift was never detected.
+const AGENT_AUTH_FILE = join(homedir(), ".pi", "agent", "auth.json");
+let agentAuthStore;
+
+function readAgentAuthKey(providerId) {
+  if (!providerId) return undefined;
+  if (agentAuthStore === undefined) {
+    try {
+      agentAuthStore = JSON.parse(readFileSync(AGENT_AUTH_FILE, "utf-8"));
+    } catch {
+      agentAuthStore = null;
+    }
+  }
+  const entry = agentAuthStore?.[providerId];
+  if (!entry) return undefined;
+  const key = typeof entry === "string" ? entry : entry.key ?? entry.apiKey ?? entry.access;
+  return typeof key === "string" && key ? key : undefined;
+}
+
+function authHeader(envKey, providerId) {
+  const key = process.env[envKey] ?? readAgentAuthKey(providerId) ?? "public";
+  return { Authorization: `Bearer ${key}` };
+}
+
+// Read limits out of an upstream /v1/models entry. The wire names differ from
+// pi's (`context_length` vs `contextWindow`, `max_output_length` vs
+// `maxTokens`), which is exactly why spreading the live object achieved nothing
+// — the values landed as inert extra keys and the curated numbers always won.
+// Only positive integers are accepted so a null/0/string placeholder can never
+// overwrite a good curated value.
+function liveLimits(live) {
+  const pick = (...names) => {
+    for (const name of names) {
+      const value = name.includes(".")
+        ? name.split(".").reduce((node, key) => (node == null ? undefined : node[key]), live)
+        : live?.[name];
+      if (Number.isInteger(value) && value > 0) return value;
+    }
+    return undefined;
+  };
+  return {
+    contextWindow: pick("context_length", "context_window", "contextWindow", "max_context_length", "max_input_tokens", "limit.context"),
+    maxTokens: pick("max_output_length", "max_output_tokens", "max_completion_tokens", "maxTokens", "limit.output"),
+  };
 }
 
 function mergeLiveModel(curated, live) {
-  // Keep curated routing/cost/limit metadata authoritative, while retaining
-  // the complete upstream object for capability detection and diagnostics.
+  // Routing (api / streamSimple flags) and cost stay curated: those encode how
+  // this extension talks to the provider, and upstream `pricing` is a
+  // unit-ambiguous string. Limits and input modalities, on the other hand, are
+  // authoritative upstream — SenseNova enforces max_output_length per model —
+  // so let live values win when they are present and sane.
+  const limits = liveLimits(live);
+  // Native image/video/audio models are driven through /images/*, /videos or
+  // /audio/*, so the chat-endpoint modalities upstream reports do not describe
+  // what they accept. sensenova-u1.5-lite advertises text-only input yet takes
+  // an image for /images/edits.
+  const nativeEndpoint = curated.opencodeImageModel === true ||
+    curated.opencodeVideoModel === true ||
+    curated.opencodeAudioModel === true ||
+    curated.opencodeTranscriptionModel === true;
+  const liveInput = Array.isArray(live?.input_modalities ?? live?.inputModalities)
+    ? (live.input_modalities ?? live.inputModalities).filter((item) => item === "text" || item === "image")
+    : undefined;
   return {
     ...live,
     ...curated,
     id: curated.id,
     name: curated.name ?? live.name ?? live.label ?? curated.id,
+    ...(limits.contextWindow ? { contextWindow: limits.contextWindow } : {}),
+    ...(limits.maxTokens ? { maxTokens: limits.maxTokens } : {}),
+    ...(!nativeEndpoint && liveInput?.length ? { input: liveInput } : {}),
     opencodeLiveModel: live,
   };
 }
@@ -1931,9 +1995,18 @@ function withCapabilities(model) {
     type === "video" || live.supports_video === true || has("video");
   const audio = model.opencodeAudioModel === true || model.opencodeTranscriptionModel === true || inputModalities.includes("audio") || outputModalities.includes("audio") ||
     type === "audio" || live.supports_audio === true || has("audio", "speech", "transcription");
-  const tools = live.features?.tools === false || live.capabilities?.tools === false
+  // Native image/video/audio models never reach chat completions, so they
+  // cannot run tools no matter what the gateway advertises — SenseNova reports
+  // a generic supported_features: ["tools", ...] for its image models too.
+  const nativeEndpoint = model.opencodeImageModel === true ||
+    model.opencodeVideoModel === true ||
+    model.opencodeAudioModel === true ||
+    model.opencodeTranscriptionModel === true;
+  const tools = nativeEndpoint
     ? false
-    : model.tools !== false;
+    : live.features?.tools === false || live.capabilities?.tools === false
+      ? false
+      : model.tools !== false;
   return {
     ...model,
     capabilities: {
@@ -2226,15 +2299,15 @@ async function verifyAndUpdateModels(pi) {
   const signal = AbortSignal.timeout(45000);
   const zenHeaders = {
     ...OPENCODE_STATIC_HEADERS,
-    Authorization: `Bearer ${process.env.OPENCODE_API_KEY ?? "public"}`,
+    ...authHeader("OPENCODE_API_KEY", "opencode-zen"),
   };
   const [zenLive, sensenovaModels, siliconflowModels, modelscopeModels, nvidiaModels, agnesModels] = await Promise.all([
     fetchLiveModelIds(`${ZEN_BASE_URL}/models`, zenHeaders, signal),
-    filterToLive(SENSENOVA_MODELS, "https://token.sensenova.cn/v1/models", authHeader("SENSENOVA_API_KEY"), signal),
-    filterToLive(SILICONFLOW_MODELS, "https://api.siliconflow.cn/v1/models", authHeader("SILICONFLOW_API_KEY"), signal),
-    filterToLive(MODELSCOPE_MODELS, "https://api-inference.modelscope.cn/v1/models", authHeader("MODELSCOPE_API_KEY"), signal),
-    filterToLive(NVIDIA_MODELS, "https://integrate.api.nvidia.com/v1/models", authHeader("NVIDIA_NIM_API_KEY"), signal),
-    filterToLive(AGNES_MODELS, "https://apihub.agnes-ai.com/v1/models", authHeader("AGNES_API_KEY"), signal),
+    filterToLive(SENSENOVA_MODELS, "https://token.sensenova.cn/v1/models", authHeader("SENSENOVA_API_KEY", "sensenova"), signal),
+    filterToLive(SILICONFLOW_MODELS, "https://api.siliconflow.cn/v1/models", authHeader("SILICONFLOW_API_KEY", "siliconflow"), signal),
+    filterToLive(MODELSCOPE_MODELS, "https://api-inference.modelscope.cn/v1/models", authHeader("MODELSCOPE_API_KEY", "modelscope"), signal),
+    filterToLive(NVIDIA_MODELS, "https://integrate.api.nvidia.com/v1/models", authHeader("NVIDIA_NIM_API_KEY", "nvidia"), signal),
+    filterToLive(AGNES_MODELS, "https://apihub.agnes-ai.com/v1/models", authHeader("AGNES_API_KEY", "agnes"), signal),
   ]);
   const zenModels = zenLive ? await verifyZenModels(zenLive, signal) : ZEN_FREE_MODELS;
   const verified = {
