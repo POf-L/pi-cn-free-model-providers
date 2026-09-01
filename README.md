@@ -135,14 +135,16 @@ pi --model opencode-zen/big-pickle
 | 模型 ID | 说明 | 上下文 | 输出上限 | 思考档位 |
 |---|---|---|---|---|
 | `muse-spark-1.2-contributor-free` | 仅 Responses API（`/chat/completions` 返回 500），文本+图像 | 1M | 131,072 | 到 `xhigh` |
-| `big-pickle` | 匿名 stealth 模型（社区确认底层≈DeepSeek V4 Flash） | 200K | 131,072 | 不接受 effort 字段 |
-| `mimo-v2.5-free` | 多模态系列的文本档 | 200K | 131,072 | 不接受 effort 字段 |
+| `big-pickle` | 匿名 stealth 模型（社区确认底层≈DeepSeek V4 Flash） | 200K | 131,072 | 到 `max` |
+| `mimo-v2.5-free` | 多模态系列的文本档 | 200K | 131,072 | 到 `high`（无 `minimal`/`xhigh`/`max`） |
 | `ling-3.0-flash-fin-free` | 新上线免费模型（替代已下线的 `hy3-free`） | 256K | 65,536 | 到 `max` |
 | `laguna-s-2.1-free` | 长时程 agent 编码 | 256K | 131,072 | 到 `max` |
 | `nemotron-3-ultra-free` | 超长上下文（1M） | 1M | 131,072 | 到 `max` |
 | `nemotron-3.5-lightning-free` | 高速执行 | 1M | 131,072 | 到 `max` |
 
-> 🧠 **思考档位**：pi 默认只暴露 `off/minimal/low/medium/high`，`xhigh` 与 `max` 必须由模型在 `thinkingLevelMap` 里显式声明才会出现在 `/think` 里。Zen 的 `/chat/completions` 在拒绝非法值时会报出完整枚举 `none|minimal|low|medium|high|xhigh|max`，`/responses`（muse-spark）则是 `none|minimal|low|medium|high|xhigh`（无 `max`），白名单按此逐模型标注。`mimo-v2.5-free` 与 `big-pickle` 对任何 `reasoning_effort`（包括合法值）都回 400 `Invalid request parameters`，只有省略该字段才能工作，因此它们不声明 `thinkingLevelMap`，插件也不会给它们发这个字段。
+> 🧠 **思考档位**：pi 默认只暴露 `off/minimal/low/medium/high`，`xhigh` 与 `max` 必须由模型在 `thinkingLevelMap` 里显式声明才会出现在 `/think` 里。枚举按**每个模型**实测（每个取值跑 4 次）：`/chat/completions` 上 `big-pickle`、`ling-3.0-flash-fin-free`、`laguna-s-2.1-free`、两个 nemotron 是完整的 `none|minimal|low|medium|high|xhigh|max`；`mimo-v2.5-free` 只吃 `none|low|medium|high`；`/responses`（muse-spark）是 `none|minimal|low|medium|high|xhigh`，没有 `max`。不支持的档位在 `/think` 里直接不出现，也不会被悄悄替换成别的强度。
+>
+> ⚠️ 探测这类枚举时注意：`mimo-v2.5-free` 对不支持的**取值**只回一句 `[400] Invalid request parameters`，既不点名字段也不给枚举，和「根本不支持这个字段」长得一模一样。只用 `xhigh` 探一次会得出「完全不支持 effort」的错误结论（本项目确实先踩过一次）。必须逐值枚举。
 
 > 下线/不可用：`hy3-free` 已从 `/v1/models` 消失，调用返回 `Model hy3-free is not supported`，已移出白名单。`deepseek-v4-flash-free` 仍在目录里但调用返回 `Model is unavailable.`，因此不收录。`x-preview-f-free`（Ox Alpha）此前已转付费并移除。
 >

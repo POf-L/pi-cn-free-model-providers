@@ -573,11 +573,16 @@ async function run(stream, output, model, context, options, cfg) {
     // (a level name from off|minimal|low|medium|high|xhigh|max). Forward it as
     // reasoning_effort, translated through the model's thinkingLevelMap, so the
     // /think selection actually reaches the gateway instead of being dropped.
-    // Only models that declare a map get the field — the ones that reject it
-    // outright (mimo-v2.5-free, big-pickle) must not receive it at all.
+    // Only models that declare a map get the field, and a level the map sends to
+    // null is dropped rather than sent — the gateways 400 on values outside their
+    // per-model enum, so an unmapped model must not receive the field at all.
     const level = options?.reasoning ?? options?.thinkingLevel;
     if (model.thinkingLevelMap && typeof level === "string") {
-      const effort = model.thinkingLevelMap[level] ?? level;
+      // `?? level` would be wrong here: ?? only falls through on null/undefined,
+      // so a deliberately null-mapped level would fall back to its own name and
+      // get sent anyway — exactly the 400 the null is there to prevent.
+      const mapped = model.thinkingLevelMap[level];
+      const effort = mapped === undefined ? level : mapped;
       if (effort) body.reasoning_effort = effort;
     }
     // Thinking mode for providers that opt in via a gateway extension field
@@ -640,21 +645,34 @@ async function run(stream, output, model, context, options, cfg) {
 // additionally probe-verified as free at load (see verifyZenModels): unknown
 // free models are auto-added with conservative metadata, and curated entries
 // that switched to paid are dropped despite being whitelisted.
-// Both gateways validate `reasoning_effort` and name the accepted values when a
-// value is rejected, so these maps are transcribed from the gateways' own error
-// text rather than guessed. pi only offers xhigh/max when a model declares them
-// (see getSupportedThinkingLevels), and it has no wire value for "off" on this
-// transport, so that maps to "none". `null` marks a level the gateway refuses,
-// which hides it in /think instead of silently substituting another effort.
-// NOT every model takes the field: Zen's mimo-v2.5-free and big-pickle answer
-// 400 "Invalid request parameters" for any reasoning_effort (including valid
-// ones) and work only when it is omitted, so they deliberately carry no map —
-// `run` keys the field's presence off thinkingLevelMap.
+// Both gateways validate `reasoning_effort` and mostly name the accepted values
+// when one is rejected, so these maps are transcribed from the gateways' own
+// error text rather than guessed. pi only offers xhigh/max when a model declares
+// them (see getSupportedThinkingLevels), and it has no wire value for "off" on
+// this transport, so that maps to "none". `null` marks a level the gateway
+// refuses, which hides it in /think instead of silently substituting another
+// effort.
+//
+// Zen's mimo-v2.5-free is the trap here: it answers an unsupported *value* with
+// a generic `[400] Invalid request parameters` that names neither the field nor
+// the enum, which is indistinguishable from rejecting the field itself. Probing
+// it with xhigh alone therefore reads as "no effort support at all" — it in fact
+// accepts none|low|medium|high and rejects only minimal|xhigh|max. Every value
+// is enumerated per model below, four attempts each, because of this.
+
+// Unsupported levels are spelled out as `null` rather than left out. For
+// xhigh/max either form hides the level in /think, but `null` also makes `run`
+// drop the field instead of forwarding the level name verbatim, so a level that
+// reaches the transport without passing through pi's clamp still cannot produce a
+// 400. (getSupportedThinkingLevels checks `mapped === null` before its
+// xhigh/max opt-in rule, so nulling them does not accidentally enable them.)
 
 // none|minimal|low|medium|high|xhigh|max
 const EFFORT_LEVELS_ALL = { off: "none", xhigh: "xhigh", max: "max" };
 // none|low|medium|high|xhigh — no minimal, no max
-const EFFORT_LEVELS_NO_MINIMAL_MAX = { off: "none", minimal: null, xhigh: "xhigh" };
+const EFFORT_LEVELS_NO_MINIMAL_MAX = { off: "none", minimal: null, xhigh: "xhigh", max: null };
+// none|low|medium|high — no minimal, no xhigh, no max
+const EFFORT_LEVELS_BASIC = { off: "none", minimal: null, xhigh: null, max: null };
 
 const ZEN_FREE_MODELS = [
   {
@@ -672,9 +690,10 @@ const ZEN_FREE_MODELS = [
     // thinkingLevelMap (getSupportedThinkingLevels treats those two as opt-in),
     // so without this the gateway's highest effort was unreachable from /think.
     // /responses accepts none|minimal|low|medium|high|xhigh for this model and
-    // rejects max, so only xhigh is declared; pi sends the "off" level as
-    // reasoning.effort "none" on its own.
-    thinkingLevelMap: { xhigh: "xhigh" },
+    // rejects max. This model is the one that runs on pi's own transport rather
+    // than `run`, and pi resolves the off level as thinkingLevelMap.off ?? "none",
+    // so off is spelled out to keep both code paths reading the same map.
+    thinkingLevelMap: { off: "none", xhigh: "xhigh", max: null },
     input: ["text", "image"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 1048576,
@@ -691,6 +710,7 @@ const ZEN_FREE_MODELS = [
     name: "MiMo-V2.5 Free",
     api: "openai-completions",
     reasoning: true,
+    thinkingLevelMap: EFFORT_LEVELS_BASIC,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 200000,
@@ -756,6 +776,7 @@ const ZEN_FREE_MODELS = [
     name: "Big Pickle",
     api: "openai-completions",
     reasoning: true,
+    thinkingLevelMap: EFFORT_LEVELS_ALL,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 200000,
