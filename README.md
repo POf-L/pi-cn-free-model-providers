@@ -164,16 +164,18 @@ export SENSENOVA_API_KEY=sk-xxx
 
 数据源：`GET /v1/models`（带 key）返回的权威目录，全部 `pricing.prompt = pricing.completion = 0`。上下文/输出上限取自目录的 `context_length` / `max_output_length`，插件启动时用实时值覆盖白名单里的静态数字。
 
-| 模型 ID | 说明 | 上下文 | 输出上限 |
-|---|---|---|---|
-| `sensenova-6.7-flash-lite` | 轻量多模态智能体（文本+图像） | 256K | 65,536 |
-| `sensenova-6.8-flash-lite` | 新一代轻量多模态智能体（文本+图像） | 256K | 65,536 |
-| `deepseek-v4-flash` | DeepSeek 高性能对话（thinking/非 thinking、工具调用） | 1M | 65,536 |
-| `deepseek-v4-pro` | DeepSeek 旗舰推理（2026-09 实测免费可用） | 1M | 65,536 |
-| `glm-5.2` | 智谱旗舰长程任务模型 | 1M | 131,072 |
-| `kimi-k3` | Moonshot 旗舰（2026-09 实测免费可用） | 1M | 65,536 |
-| `sensenova-u1-fast` | 图像生成专用（`/v1/images/generations`） | 256K | 65,536 |
-| `sensenova-u1.5-lite` | 图像生成/编辑（`/v1/images/generations`、`/v1/images/edits`） | 256K | 65,536 |
+| 模型 ID | 说明 | 上下文 | 输出上限 | 思考档位 |
+|---|---|---|---|---|
+| `sensenova-6.7-flash-lite` | 轻量多模态智能体（文本+图像） | 256K | 65,536 | 到 `xhigh`（无 `minimal`/`max`） |
+| `sensenova-6.8-flash-lite` | 新一代轻量多模态智能体（文本+图像） | 256K | 65,536 | 到 `xhigh`（无 `minimal`/`max`） |
+| `deepseek-v4-flash` | DeepSeek 高性能对话（thinking/非 thinking、工具调用） | 1M | 65,536 | 到 `xhigh`（无 `minimal`/`max`） |
+| `deepseek-v4-pro` | DeepSeek 旗舰推理（2026-09 实测免费可用） | 1M | 65,536 | 到 `max` |
+| `glm-5.2` | 智谱旗舰长程任务模型 | 1M | 131,072 | 到 `max` |
+| `kimi-k3` | Moonshot 旗舰（2026-09 实测免费可用） | 1M | 65,536 | 到 `max` |
+| `sensenova-u1-fast` | 图像生成专用（`/v1/images/generations`） | 256K | 65,536 | — |
+| `sensenova-u1.5-lite` | 图像生成/编辑（`/v1/images/generations`、`/v1/images/edits`） | 256K | 65,536 | — |
+
+> 🧠 **思考档位**：SenseNova 也接受 `reasoning_effort`，而且**按模型**校验枚举——`glm-5.2` / `deepseek-v4-pro` / `kimi-k3` 是完整的 `none|minimal|low|medium|high|xhigh|max`，三个 flash 档只有 `none|low|medium|high|xhigh`（传 `minimal` 或 `max` 会 400 `field ReasoningEffort invalid`）。白名单按各自枚举标注，不支持的档位在 `/think` 里直接不出现，而不是被悄悄替换成别的强度。
 
 `sensenova-u1-fast` 和 `sensenova-u1.5-lite` 注册为图像模型，不会误走 chat completions；生成结果保存到 `.pi/generated-images/`，路径在 TUI 中渲染为可点击的 `file://` 链接。
 
@@ -188,7 +190,7 @@ pi --provider sensenova --model sensenova/glm-5.2
 
 ### SenseNova 特有的坑（已内置处理）
 
-网关 schema 比 OpenAI 更严，**官方参数表未列出的字段一律拒收**（报错被替换成无信息量的 `Errors in message queue response`）。扩展内置 `cleanBody` 已处理：合并多条 `system` 消息、删除 `assistant.content: null`。`max_tokens` 按**每个模型**校验（`sensenova-6.8-flash-lite` 拒绝 65537，`glm-5.2` 接受 131072，`deepseek-v4-pro` 上限 393216），因此以模型注册值为准而非一个全局常量。思维链以 `delta.reasoning` 回传（不是 `reasoning_content`），扩展两种都接收。
+网关 schema 比 OpenAI 更严，**官方参数表未列出的字段一律拒收**（报错被替换成无信息量的 `Errors in message queue response`）。扩展内置 `cleanBody` 已处理：合并多条 `system` 消息、删除 `assistant.content: null`。`max_tokens` 按**每个模型**校验（`sensenova-6.8-flash-lite` 拒绝 65537，`glm-5.2` 接受 131072，`deepseek-v4-pro` 上限 393216），因此以模型注册值为准而非一个全局常量。思维链以 `delta.reasoning` 回传（不是 `reasoning_content`），扩展两种都接收。控制思考强度只认 `reasoning_effort`（按模型校验枚举，见上）；`thinking: {...}`、`enable_thinking`、`chat_template_kwargs` 这几种其它网关的写法都返回 200 但被静默忽略，别指望它们生效。
 
 ## opencode 原生集成
 

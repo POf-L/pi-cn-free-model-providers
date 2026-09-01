@@ -640,15 +640,21 @@ async function run(stream, output, model, context, options, cfg) {
 // additionally probe-verified as free at load (see verifyZenModels): unknown
 // free models are auto-added with conservative metadata, and curated entries
 // that switched to paid are dropped despite being whitelisted.
-// Zen's /chat/completions names its effort enum when a value is rejected:
-// none|minimal|low|medium|high|xhigh|max. pi only offers xhigh/max when a model
-// declares them (see getSupportedThinkingLevels), and it has no "off" wire value
-// of its own on this transport, so map that to the gateway's "none".
-// NOT every Zen model takes the field: mimo-v2.5-free and big-pickle answer 400
-// "Invalid request parameters" for any reasoning_effort (including valid ones)
-// and work only when it is omitted, so they deliberately carry no map — `run`
-// keys the field's presence off thinkingLevelMap.
-const ZEN_CHAT_THINKING_LEVELS = { off: "none", xhigh: "xhigh", max: "max" };
+// Both gateways validate `reasoning_effort` and name the accepted values when a
+// value is rejected, so these maps are transcribed from the gateways' own error
+// text rather than guessed. pi only offers xhigh/max when a model declares them
+// (see getSupportedThinkingLevels), and it has no wire value for "off" on this
+// transport, so that maps to "none". `null` marks a level the gateway refuses,
+// which hides it in /think instead of silently substituting another effort.
+// NOT every model takes the field: Zen's mimo-v2.5-free and big-pickle answer
+// 400 "Invalid request parameters" for any reasoning_effort (including valid
+// ones) and work only when it is omitted, so they deliberately carry no map —
+// `run` keys the field's presence off thinkingLevelMap.
+
+// none|minimal|low|medium|high|xhigh|max
+const EFFORT_LEVELS_ALL = { off: "none", xhigh: "xhigh", max: "max" };
+// none|low|medium|high|xhigh — no minimal, no max
+const EFFORT_LEVELS_NO_MINIMAL_MAX = { off: "none", minimal: null, xhigh: "xhigh" };
 
 const ZEN_FREE_MODELS = [
   {
@@ -698,7 +704,7 @@ const ZEN_FREE_MODELS = [
     name: "Ling 3.0 Flash Fin Free",
     api: "openai-completions",
     reasoning: true,
-    thinkingLevelMap: ZEN_CHAT_THINKING_LEVELS,
+    thinkingLevelMap: EFFORT_LEVELS_ALL,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 262144,
@@ -711,7 +717,7 @@ const ZEN_FREE_MODELS = [
     name: "Laguna S 2.1 Free",
     api: "openai-completions",
     reasoning: true,
-    thinkingLevelMap: ZEN_CHAT_THINKING_LEVELS,
+    thinkingLevelMap: EFFORT_LEVELS_ALL,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 262144,
@@ -725,7 +731,7 @@ const ZEN_FREE_MODELS = [
     name: "Nemotron 3 Ultra Free",
     api: "openai-completions",
     reasoning: true,
-    thinkingLevelMap: ZEN_CHAT_THINKING_LEVELS,
+    thinkingLevelMap: EFFORT_LEVELS_ALL,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 1000000,
@@ -736,7 +742,7 @@ const ZEN_FREE_MODELS = [
     name: "Nemotron 3.5 Lightning Free",
     api: "openai-completions",
     reasoning: true,
-    thinkingLevelMap: ZEN_CHAT_THINKING_LEVELS,
+    thinkingLevelMap: EFFORT_LEVELS_ALL,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 1000000,
@@ -762,6 +768,7 @@ const SENSENOVA_MODELS = [
     name: "SenseNova 6.7 Flash-Lite",
     api: "openai-completions",
     reasoning: true,
+    thinkingLevelMap: EFFORT_LEVELS_NO_MINIMAL_MAX,
     input: ["text", "image"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 262144,
@@ -772,6 +779,7 @@ const SENSENOVA_MODELS = [
     name: "SenseNova 6.8 Flash-Lite",
     api: "openai-completions",
     reasoning: true,
+    thinkingLevelMap: EFFORT_LEVELS_NO_MINIMAL_MAX,
     input: ["text", "image"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 262144,
@@ -782,6 +790,7 @@ const SENSENOVA_MODELS = [
     name: "DeepSeek V4 Flash (via SenseNova)",
     api: "openai-completions",
     reasoning: true,
+    thinkingLevelMap: EFFORT_LEVELS_NO_MINIMAL_MAX,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 1048576,
@@ -792,6 +801,7 @@ const SENSENOVA_MODELS = [
     name: "GLM-5.2 (via SenseNova)",
     api: "openai-completions",
     reasoning: true,
+    thinkingLevelMap: EFFORT_LEVELS_ALL,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 1048576,
@@ -805,6 +815,7 @@ const SENSENOVA_MODELS = [
     name: "DeepSeek V4 Pro (via SenseNova)",
     api: "openai-completions",
     reasoning: true,
+    thinkingLevelMap: EFFORT_LEVELS_ALL,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 1048576,
@@ -817,6 +828,7 @@ const SENSENOVA_MODELS = [
     name: "Kimi K3 (via SenseNova)",
     api: "openai-completions",
     reasoning: true,
+    thinkingLevelMap: EFFORT_LEVELS_ALL,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 1048576,
