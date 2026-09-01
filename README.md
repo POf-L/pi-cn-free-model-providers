@@ -1,6 +1,6 @@
 # pi-cn-free-model-providers
 
-让 [pi](https://github.com/Codeks/pi)（AI 编码助手 CLI）面向中国大陆免费用户，通过原生通道接入多个当前提供免费额度的模型供应商，包括 **OpenCode Zen、SenseNova、SiliconFlow、ModelScope、NVIDIA NIM、Cloudflare 和 Agnes AI**。各平台免费政策可能变化，模型会自动进行实时目录校验。
+让 [pi](https://github.com/Codeks/pi)（AI 编码助手 CLI）面向中国大陆免费用户，通过原生通道接入 **OpenCode Zen** 与 **SenseNova（商汤日日新）** 两个当前提供免费额度的渠道。平台免费政策可能变化，模型会自动进行实时目录校验。
 
 ## 问题背景
 
@@ -111,7 +111,7 @@ cat ~/.pi/agent/auth.json
 ```json
 {
   "defaultProvider": "opencode-zen",
-  "defaultModel": "hy3-free"
+  "defaultModel": "big-pickle"
 }
 ```
 
@@ -125,335 +125,72 @@ pi -p "Reply with exactly OK"
 pi
 
 # 指定模型
-pi --model opencode-zen/hy3-free
+pi --model opencode-zen/big-pickle
 ```
 
-### 可用免费模型
+### 可用免费模型（opencode-zen）
 
-| 模型 ID | 说明 |
-|---|---|
-| `big-pickle` | 匿名 stealth 模型（社区确认底层≈DeepSeek V4 Flash） |
-| `hy3-free` | 复杂/终端类任务 |
-| `laguna-s-2.1-free` | 长时程 agent 编码 |
-| `mimo-v2.5-free` | 多模态 |
-| `nemotron-3-ultra-free` | 超长上下文（1M） |
-| `nemotron-3.5-lightning-free` | 高速执行 |
+实时探测结果（2026-09-01，经本地 relay 直连 Zen 网关核验，全部 `cost: 0`）：
 
-> `x-preview-f-free`（Ox Alpha）已转为付费并从 Zen 目录移除，因此不再注册。历史模型状态请以实时目录和价格探测为准。
+| 模型 ID | 说明 | 上下文 | 输出上限 |
+|---|---|---|---|
+| `muse-spark-1.2-contributor-free` | 仅 Responses API（`/chat/completions` 返回 500），文本+图像 | 1M | 131,072 |
+| `big-pickle` | 匿名 stealth 模型（社区确认底层≈DeepSeek V4 Flash） | 200K | 131,072 |
+| `mimo-v2.5-free` | 多模态系列的文本档 | 200K | 131,072 |
+| `ling-3.0-flash-fin-free` | 新上线免费模型（替代已下线的 `hy3-free`） | 256K | 65,536 |
+| `laguna-s-2.1-free` | 长时程 agent 编码 | 256K | 131,072 |
+| `nemotron-3-ultra-free` | 超长上下文（1M） | 1M | 131,072 |
+| `nemotron-3.5-lightning-free` | 高速执行 | 1M | 131,072 |
+
+> 下线/不可用：`hy3-free` 已从 `/v1/models` 消失，调用返回 `Model hy3-free is not supported`，已移出白名单。`deepseek-v4-flash-free` 仍在目录里但调用返回 `Model is unavailable.`，因此不收录。`x-preview-f-free`（Ox Alpha）此前已转付费并移除。
 >
 > 🔭 **变动监听**：`.github/workflows/opencode-zen-watch.yml` 每日巡检 `/v1/models`，并使用匿名 `public` key 对在册模型做最小探测；模型消失或返回鉴权/计费拒绝时自动创建或更新维护 Issue。网络错误、429 和 5xx 只记为 UNKNOWN，不会误判为付费。
 
 TUI 内 **Ctrl+P** 循环切换模型。
 
-## 额外供应商
+## SenseNova（商汤日日新）
 
-除 Zen 免费模型外，本扩展还注册了 **7 个第三方免费/低成本供应商**。所有 provider 的 key 解析优先级一致：环境变量 → auth.json 中非 `public` 的 key → 匿名占位（1.0.4 起 provider 自注册 `apiKey: "public"`，pi 视为已配置，装完即显示；`public` 本身会被忽略走兜底）。
-
-### SenseNova（商汤日日新）
-
-接入[商汤日日新平台](https://platform.sensenova.cn/)的 OpenAI 兼容网关（`https://token.sensenova.cn/v1`），免费公测套餐可用（每模型 1,500 次调用 / 5 小时）。
-
-#### 配置
+接入[商汤日日新平台](https://platform.sensenova.cn/)的 OpenAI 兼容网关（`https://token.sensenova.cn/v1`），免费公测套餐可用。key 解析优先级：环境变量 `SENSENOVA_API_KEY` → `~/.pi/agent/auth.json` 中 `sensenova` 条目 → 匿名占位。
 
 ```bash
 # 在 https://platform.sensenova.cn/console/keys 申请 key
 export SENSENOVA_API_KEY=sk-xxx
+# 或用 pi auth 存入 ~/.pi/agent/auth.json
 ```
 
-#### 可用模型
+### 可用模型
 
-（数据源：[平台文档](https://platform.sensenova.cn/docs)，`GET /v1/models` 权威返回；全部 `pricing=0` 免费，`businesses: tokenplan + metered`）
+数据源：`GET /v1/models`（带 key）返回的权威目录，全部 `pricing.prompt = pricing.completion = 0`。上下文/输出上限取自目录的 `context_length` / `max_output_length`，插件启动时用实时值覆盖白名单里的静态数字。
 
-| 模型 ID | 说明 | 上下文 | 限额 |
+| 模型 ID | 说明 | 上下文 | 输出上限 |
 |---|---|---|---|
-| `sensenova-6.7-flash-lite` | 轻量多模态智能体（文本+图像） | 256K | 1,500 次 / 5h |
-| `sensenova-6.8-flash-lite` | 新一代轻量多模态智能体（文本+图像） | 256K | 1,500 次 / 5h |
-| `deepseek-v4-flash` | DeepSeek 高性能对话（thinking/非 thinking、工具调用） | 1M | 150 次 / 5h |
-| `glm-5.2` | 智谱旗舰长程任务模型（1M 上下文，可完成端到端开发管线） | 1M | 免费套餐可用 |
-| `sensenova-u1-fast` | 图像生成专用模型 | 256K | `/v1/images/generations` |
-| `sensenova-u1.5-lite` | 图像生成/编辑模型 | 256K | `/v1/images/generations`、`/v1/images/edits` |
+| `sensenova-6.7-flash-lite` | 轻量多模态智能体（文本+图像） | 256K | 65,536 |
+| `sensenova-6.8-flash-lite` | 新一代轻量多模态智能体（文本+图像） | 256K | 65,536 |
+| `deepseek-v4-flash` | DeepSeek 高性能对话（thinking/非 thinking、工具调用） | 1M | 65,536 |
+| `deepseek-v4-pro` | DeepSeek 旗舰推理（2026-09 实测免费可用） | 1M | 65,536 |
+| `glm-5.2` | 智谱旗舰长程任务模型 | 1M | 131,072 |
+| `kimi-k3` | Moonshot 旗舰（2026-09 实测免费可用） | 1M | 65,536 |
+| `sensenova-u1-fast` | 图像生成专用（`/v1/images/generations`） | 256K | 65,536 |
+| `sensenova-u1.5-lite` | 图像生成/编辑（`/v1/images/generations`、`/v1/images/edits`） | 256K | 65,536 |
 
-`sensenova-u1-fast` 和 `sensenova-u1.5-lite` 已注册为图像模型，不会误走 chat completions；生成结果保存到 `.pi/generated-images/`，支持终端通过 TUI Image 回显，保存路径在 TUI 中渲染为可点击的 `file://` 链接（OSC 8 超链接，Windows Terminal / WezTerm / iTerm2 / Kitty 可一键打开）。
+`sensenova-u1-fast` 和 `sensenova-u1.5-lite` 注册为图像模型，不会误走 chat completions；生成结果保存到 `.pi/generated-images/`，路径在 TUI 中渲染为可点击的 `file://` 链接。
 
-> 🔭 **变动监听**：`.github/workflows/sensenova-watch.yml` 每周巡检（04:59 UTC）。平台文档站是 SPA 壳无法匿名抓取，故走带密钥的权威目录 `GET /v1/models`（响应含 pricing 等计费元数据）：在册模型消失＝下线/改名；pricing 非 0＝免费档撤销；新 id 出现＝新模型上线并附计费元数据供评估收录。需配置 secret `SENSENOVA_API_KEY`；基线存 `.github/watch-state/` 由 workflow 自动提交。
+> 🔭 **变动监听**：`.github/workflows/sensenova-watch.yml` 每周巡检（04:59 UTC），走带密钥的权威目录 `GET /v1/models`：在册模型消失＝下线/改名；pricing 非 0＝免费档撤销；新 id 出现＝新模型上线。需配置 secret `SENSENOVA_API_KEY`；基线存 `.github/watch-state/`。
 
-#### 使用
+### 使用
 
 ```bash
-pi -p --provider sensenova --model sensenova/sensenova-6.7-flash-lite "你好"
-pi --provider sensenova --model sensenova/deepseek-v4-flash
+pi -p --provider sensenova --model sensenova/sensenova-6.8-flash-lite "你好"
+pi --provider sensenova --model sensenova/glm-5.2
 ```
 
-#### SenseNova 特有的坑（已内置处理）
+### SenseNova 特有的坑（已内置处理）
 
-网关 schema 比 OpenAI 更严，**官方参数表未列出的字段一律拒收**（报错被替换成无信息量的 `Errors in message queue response`）。扩展内置 `cleanBody` 已处理：合并多条 `system` 消息、删除 `assistant.content: null`；`max_tokens` 上限 65,536（模型注册即设好）、上下文 256K。
-
-### 硅基流动 (SiliconFlow)
-
-国内直连。⚠️ 免费档 2026-08 已大幅收缩：旗舰 `Nex-N2-Pro`（397B MoE）已转付费（输入¥0.00175/输出¥0.007 每K tokens），当前免费聊天模型仅剩小模型（经模型广场计价接口逐个实测核验）：
-
-```bash
-# 在 https://cloud.siliconflow.cn 注册实名，获取 key
-export SILICONFLOW_API_KEY=sk-xxx
-
-# 使用
-pi -p --provider siliconflow --model siliconflow/Qwen/Qwen3-8B "你好"
-```
-
-| 模型 ID | 说明 | 上下文 | 限额 |
-|---|---|---|---|
-| `Qwen/Qwen3-8B` | Qwen3-8B 通用对话（免费档主力） | 128K | 免费 |
-| `deepseek-ai/DeepSeek-R1-0528-Qwen3-8B` | R1 蒸馏 8B 强推理 | 128K | 免费 |
-| `THUDM/GLM-Z1-9B-0414` | GLM-Z1 9B 推理 | 128K | 免费 |
-| `THUDM/GLM-4-9B-0414` | GLM-4 9B 通用 | 32K | 免费 |
-| `Qwen/Qwen3.5-4B` | Qwen3.5 4B 轻量长上下文 | 256K | 免费 |
-| `Tongyi-MAI/Z-Image-Turbo` | 文生图模型 | — | `/v1/images/generations` |
-
-> SiliconFlow 的图像 / 视频 / 音频均已接入并实测：文生图 `Tongyi-MAI/Z-Image-Turbo`（`/v1/images/generations`，响应 `data[].url`，已验证返回 PNG）；文生视频 `Wan-AI/Wan2.2-T2V-A14B`（`/v1/video/submit` 拿 `requestId` → 轮询 `/v1/video/status` 取 `results.videos[0].url`，已验证下载到 `video/mp4`）；TTS `FunAudioLLM/CosyVoice2-0.5B`（`voice` 格式 `{模型id}:{说话人}`，已验证）与 ASR `FunAudioLLM/SenseVoiceSmall`（已验证）。生成结果分别存到 `.pi/generated-images/`、`.pi/generated-videos/`、`.pi/generated-audio/`，并在 TUI 中渲染为可点击的 `file://` 链接（视频本质也是可点击路径，浏览器/播放器可打开）。
-
-> 其余仍有免费的类别：向量 `BAAI/bge-m3` 等、重排序 `bge-reranker-v2-m3`、ASR `SenseVoiceSmall`/`TeleSpeechASR`、生图 `Kolors`（均非编码对话用途）。原免费标杆 `Qwen2.5-7B-Instruct` 已收费；`glm-4-9b-chat`、`Qwen2-7B-Instruct`、`DeepSeek-R1-Distill-Qwen-7B`、`bce` 向量/重排序等已下线。
-
-> 🔭 **变动监听**：`.github/workflows/siliconflow-watch.yml` 每周抓取官方更新公告（docs.siliconflow.cn/cn/release-notes，公开免鉴权），命中在册模型关键词（下线/计费调整/免费撤销）即自动开 issue——公告通常提前约 7 天发布，留足处置窗口。
-
-### 魔塔社区 (ModelScope)
-
-阿里达摩院旗下，一个 Key 同时兼容 OpenAI + Anthropic 双协议，每日 2000 次免费调用。
-
-```bash
-# 在 https://modelscope.cn 注册，绑定阿里云账号+实名，获取 SDK Token
-export MODELSCOPE_API_KEY=ms-xxx
-
-# 使用
-pi -p --provider modelscope --model modelscope/Qwen/Qwen3-Coder-30B-A3B-Instruct "你好"
-```
-
-| 模型 ID | 说明 | 上下文 | 限额 |
-|---|---|---|---|
-| `Qwen/Qwen3-Coder-30B-A3B-Instruct` | Qwen3 Coder 30B（实测可用） | 128K | 2000 次/天 |
-| `deepseek-ai/DeepSeek-V4-Pro` | DeepSeek V4 Pro 强推理（存在，**需在控制台开通该模型额度**，否则 429） | 1M | 开通后 2000 次/天 |
-
-> 实测发现 ModelScope 免费额度是**按模型**的：新账号默认只有部分模型可用（如 Qwen3-Coder-30B），其余返回 `UnknownError` 或 429 `insufficient_quota`，需在 [ModelScope 控制台](https://modelscope.cn) 逐个开通。可用模型以 `GET /v1/models` 为准（本扩展只注册了实测过的模型）。
-
-### NVIDIA NIM
-
-NVIDIA 官方推理平台（build.nvidia.com），无需信用卡。限额：**40 RPM + 10,000 次/天**（官网公布数据，每日重置）。注意 RPM 是**账号级**限制、全部模型共享，适合低频调用/兑底渠道。完整目录约 102 个模型（`GET /v1/models` 可匿名查询），本扩展收录 2026-08 流式实测通过的 5 个：
-
-```bash
-# 在 https://build.nvidia.com 注册获取 key
-export NVIDIA_NIM_API_KEY=nvapi-xxx
-
-# 使用
-pi -p --provider nvidia --model nvidia/openai/gpt-oss-20b "你好"
-```
-
-| 模型 ID | 说明 | 上下文 | 实测（2026-08 流式探测） |
-|---|---|---|---|
-| `openai/gpt-oss-20b` | ⭐ 实测最快：TTFB 0.8s / ~130 tok/s；数学/工具调用继承 GPT-OSS 家族，中文偏弱 | 128K | ✅ |
-| `minimaxai/minimax-m3` | MiniMax 推理模型：TTFB 0.8s / ~70 tok/s | 128K | ✅ |
-| `nvidia/nemotron-3-nano-30b-a3b` | Nemotron 3 Nano MoE（思考型）：TTFB 0.8s / ~80 tok/s | 128K | ✅ |
-| `moonshotai/kimi-k3` | Moonshot 旗舰：生成偏慢（~5-18 tok/s） | 128K | ⚠️ 慢 |
-| `nvidia/llama-3.3-nemotron-super-49b-v1.5` | Nemotron Super 思考型：思维链消耗大量 max_tokens，有效速度慢 | 128K | ⚠️ 慢 |
-
-> 实测排除：`deepseek-v4-flash-0731`（读超时 ×2）、`stepfun-ai/step-3.7-flash`（HTTP 500）、`kimi-k2.6` / `mistralai/codestral-22b`（HTTP 404 免费账号无权限）、`openai/gpt-oss-120b`（本地 + CI 双网络连续超时，巡检确认后移除；Cloudflare 站有同名模型兑底）。工具调用兼容性未逐一验证。
-
-> 🔭 **变动监听**：`.github/workflows/nvidia-watch.yml` 每周巡检（04:11 UTC）：匿名目录比对捕获下线/改名 + 仓库密钥对在册模型发微型流式探活（捕获「在册但不可用/无权限」）+ 重点厂商新增条目扫描提示评估收录；基线与指纹存 `.github/watch-state/` 由 workflow 自动提交。需配置 secret `NVIDIA_NIM_API_KEY`。
-
-### Agnes AI（国际站 + 中国站）
-
-[Agnes AI](https://www.agnes-ai.com/zh-Hans/docs/overview) 的 OpenAI 兼容网关，国际站（`apihub.agnes-ai.com`）与中国站（`api.agnes-ai.cn`）各注册一个 provider，模型阵容一致。Flash 系当前限时免费（`$0 / 1M tokens`），Pro 系为付费推理模型。支持工具调用、图片理解（base64 data URL 实测可用）、思维模式（经 `chat_template_kwargs.enable_thinking` 开启，已接入 pi 的 `thinkingLevel`）；多轮历史回传 `reasoning_content` 实测兼容。
-
-```bash
-# 在 https://www.agnes-ai.com（国际）或 https://www.agnes-ai.cn（中国）申请 key
-export AGNES_API_KEY=sk-xxx      # 国际站
-export AGNES_CN_API_KEY=sk-xxx   # 中国站
-
-# 使用
-pi -p --provider agnes --model agnes/agnes-2.5-flash "你好"
-pi -p --provider agnes-cn --model agnes-cn/agnes-2.5-pro "你好"
-```
-
-| 模型 ID | 说明 | 上下文 | 限额/价格 |
-|---|---|---|---|
-| `agnes-2.5-flash` | 全量升级版：编码专项、agent 工作流、工具调用、图像理解 | 512K | 免费（限时） |
-| `agnes-2.0-flash` | 上一代快速模型（Claw-Eval 排名 #9） | 512K | 免费（限时） |
-| `agnes-2.5-pro` | 付费推理旗舰：高级编码、科学推理、长上下文、agent 终端任务 | 1M | $0.45/M 输入、$0.90/M 输出 |
-| `agnes-2.5-pro-alpha` | 打榜版付费推理模型（同上基准参考） | 1M | $0.45/M 输入、$0.90/M 输出 |
-| `agnes-image-2.0-flash` | 图像生成专用模型 | — | `/v1/images/generations` |
-| `agnes-image-2.1-flash` | 图像生成专用模型 | — | `/v1/images/generations` |
-| `agnes-video-v2.0` | 视频生成模型 | — | `/v1/videos` + 状态轮询 |
-| `agnes-video-2.5` | 视频生成模型 | — | `/v1/videos` + 状态轮询 |
-| `agnes-video-2.5-flash` | 视频生成模型 | — | `/v1/videos` + 状态轮询 |
-
-> Agnes 图像模型使用 `/v1/images/generations`，视频模型使用 `/v1/videos` 并轮询 `/agnesapi?video_id=...`；生成结果分别保存到 `.pi/generated-images/` 和 `.pi/generated-videos/`，保存路径在 TUI 中渲染为可点击的 `file://` 链接（OSC 8 超链接）。
-
-> 🔭 **变动监听**：`.github/workflows/agnes-watch.yml` 每周巡检（04:35 UTC）：单模型文档页缺失＝疑似下线/改名；Flash 系文档「当前价格」非 $0＝限时免费撤销（最大风险）；参数指纹基线比对捕获原位升级/计费调整；`llms.txt` 全目录扫描发现新版本提示评估收录。全程匿名无需密钥。
-
-### Cloudflare Workers AI
-
-当前目录已接入两个经过真实请求验证的非文本模型：
-
-| 模型 ID | 能力 | 路由 |
-|---|---|---|
-| `@cf/black-forest-labs/flux-1-schnell` | 图像生成 | `ai/run/{model}` |
-| `@cf/deepgram/aura-2-en` | TTS（英语） | `ai/run/{model}` |
-| `@cf/deepgram/aura-2-es` | TTS（西班牙语） | `ai/run/{model}` |
-
-图像结果保存到 `.pi/generated-images/`，TTS 结果保存到 `.pi/generated-audio/`，转写（ASR）结果保存到 `.pi/generated-transcripts/`，保存路径在 TUI 中渲染为可点击的 `file://` 链接（OSC 8 超链接）。Cloudflare 的 TTS 实测可用模型为 Deepgram Aura 2 的英语（`aura-2-en`）与西班牙语（`aura-2-es`），均为 `ai/run` 返回 `audio/mpeg`，其余语言变体在 Cloudflare 上未部署（返回 404 No route）。ASR 模型均已实测确认并注册：
-- `@cf/openai/whisper`：请求体为 JSON `{ audio: <0–255 整数数组（原始字节）> }`，传 base64 字符串或对象数组都会返回 400；响应取 `result.text`。
-- `@cf/deepgram/nova-3`：把**原始音频字节作为请求体**、`Content-Type: audio/*` 发送（JSON / 对象 / multipart 形式均会 400），响应取 `result.results.channels[0].alternatives[0].transcript`。
-两者都会把附带的音频文件 base64 解码后发送，转写文本与可点击的 `.pi/generated-transcripts/` 转录文件路径会回显在 TUI。
-
-**SiliconFlow 的 TTS 与 ASR** 接了 OpenAI 兼容音频接口（共享 `streamOpenAITTS` / `streamOpenAIASR`）：TTS 调 `{baseUrl}/audio/speech`（`voice` 默认 `FunAudioLLM/CosyVoice2-0.5B:alex`，可用模型 `opencodeVoice` 覆盖），ASR 调 `{baseUrl}/audio/transcriptions`（multipart 上传音频）。已注册：SiliconFlow 的 `FunAudioLLM/CosyVoice2-0.5B`(TTS) 与 `FunAudioLLM/SenseVoiceSmall`(ASR)。（ModelScope 音频为本地 Python SDK + GPU 推理、无公开 REST 端点，未接入；通用 handler 保留备用。）
-
-**SiliconFlow 文生视频** 走异步两步：POST `/v1/video/submit`（body 含 `model`/`prompt`/`image_size`，可选 `image` 用于图生视频）拿 `requestId`，再轮询 POST `/v1/video/status`（`{requestId}`）直到 `status: "Succeed"`，从 `results.videos[0].url` 下载（已验证返回 `video/mp4`，约 3 分钟出片）。已注册 `Wan-AI/Wan2.2-T2V-A14B`（文本→视频）；若要做图生视频，可加 `*I2V*` 模型并把首张图作为 `image` 传入。
-
-实测结论（用真实 key 跑过）：
-- ✅ **SiliconFlow ASR `FunAudioLLM/SenseVoiceSmall` 已验证**：返回正确转写文本（如 `"The quick brown fox jumps over the lazy dog."`）。注意模型 id 是小写 `SenseVoiceSmall`（不是 `SenseVoice-Small`）。
-- ✅ **SiliconFlow TTS `CosyVoice2-0.5B` 已验证**：按官方文档，`voice` 格式为 `{模型id}:{说话人}`（如 `FunAudioLLM/CosyVoice2-0.5B:alex`），已实测返回 `audio/mpeg`。种子模型已把 `opencodeVoice` 设为该值；如需换说话人，改 `opencodeVoice` 即可（与 `references` 字段互斥）。
-- ❌ **ModelScope 音频未接入（已移除死模型）**：实测 `api-inference.modelscope.cn` 的 OpenAI 兼容 `/v1/audio/*` 与 MaaS `/v1/models/iic/...`（含 SAMBERT、CosyVoice2、SenseVoiceSmall，覆盖 GET/POST、数字 id、`/inference` 后缀等 10+ 种形态）**全部 404**；结合模型卡（如 `IndexTeam/IndexTTS-2.5` 的「快速开始」只给本地 `uv sync` + `tts.infer(...)` + NVIDIA GPU 的用法）可确认：ModelScope 音频模型是**本地 Python SDK + GPU 推理**，没有托管的公开 REST 端点。因此已从种子列表移除 `iic/CosyVoice2-0.5B` / `iic/SenseVoiceSmall`（选了会 404）；通用 `streamOpenAITTS`/`streamOpenAIASR` handler 保留，若将来出现可公开调用的 ModelScope 音频端点可立即复用。
-
-Cloudflare 官方托管推理平台，走 **OpenAI 兼容端点**（`https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1`）。注意它**没有免费模型清单**：全平台共享每天 **10,000 Neurons** 的免费算力（UTC 0 点重置），而每个模型的单价差异极大（输出单价最高与最低相差约 16 倍）——大模型重活一天可能只够几轮。定位建议：轻量问答 / 兜底备用，不适合当主力；下表给出逐模型换算。
-
-> 数据来源：官方定价页（developers.cloudflare.com/workers-ai/platform/pricing/），2026-08 实测抓取。
-
-#### 配置
-
-```bash
-# 在 https://dash.cloudflare.com 获取 Account ID，创建 API Token（Workers AI 权限）
-export CLOUDFLARE_ACCOUNT_ID=your-32-character-account-id
-export CLOUDFLARE_API_KEY=your-api-token
-```
-
-#### 可用模型
-
-（数据源：官方定价页 + `GET /accounts/{id}/ai/models/search`；仅注册免费额度内可用的模型）
-
-| 模型 ID | 说明 | 上下文 | 免费额度 ≈ 纯输出/天* |
-|---|---|---|---|
-| `@cf/openai/gpt-oss-120b` | OpenAI 开源旗舰（编码/数学强） | 128K | ≈147K tokens |
-| `@cf/openai/gpt-oss-20b` | 低延迟版 | 128K | ≈367K tokens |
-| `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | 最强 Llama 3.3 | 128K | ⚠️ ≈49K tokens |
-| `@cf/qwen/qwen3-30b-a3b-fp8` | Qwen3 MoE 高效 | 128K | ≈328K tokens |
-| `@cf/qwen/qwen2.5-coder-32b-instruct` | 代码专用 | 128K | ≈110K tokens |
-| `@cf/google/gemma-4-26b-a4b-it` | Google 多模态（文本+图像） | 128K | ≈367K tokens |
-| `@cf/zai-org/glm-4.7-flash` | 131K 上下文 | 131K | ≈275K tokens |
-| `@cf/deepseek-ai/deepseek-r1-distill-qwen-32b` | DeepSeek 推理 | 64K | ⚠️ ≈23K tokens |
-
-\* 按 10,000 Neurons/天 ÷ 该模型每百万输出 token 的 neurons 单价估算，输入另计。⚠️ = 额度杀手：`deepseek-r1-distill` 输出单价高达 443,756 neurons/M（推理模型输出又长，最容易打穿当日额度）；`llama-3.3-70b-fast` 输出 204,805/M 且输入 26,668/M——塞一个 10 万 token 仓库上下文就吃掉日额度的 27%。
-
-> ⚠️ **付费模型未注册**：`deepseek-v4-flash-0731`、`deepseek-v4-pro-0813`、`glm-5.2`、`kimi-k2.6`、`kimi-k2.7-code` 需 Workers Paid 账单或 AI Gateway 预付额度，免费额度调用会失败，本扩展（及 opencode blacklist）已排除。
-
-> 🔭 **变动监听**：`.github/workflows/cloudflare-watch.yml` 每周巡检（03:47 UTC）双向检测：① 在册模型从官方目录页消失即报——运行时 `filterToLive` 对 Cloudflare 不生效（其 models 端点按账号鉴权），此工作流是唯一兜底；② 新模型发现——官方定价页按模型列出 Neurons 单价，新上架即被捕获，并自动按 10,000 Neurons/天免费额度换算日输出预算分级提示（≥100K tokens/天“优先评估”、30–100K“可用但偏耗额度”、<30K“额度杀手”；对标 gpt-oss-120b ≈147K）。基线存 `.github/watch-state/` 由 workflow 自动提交，全程匿名无需密钥。
-
-#### 使用
-
-```bash
-pi -p --provider cloudflare --model cloudflare/@cf/openai/gpt-oss-120b "你好"
-```
-
-#### Cloudflare 特有的坑（已内置处理）
-
-- URL 路径内嵌账户 ID，`streamCloudflare` 在请求时从 `CLOUDFLARE_ACCOUNT_ID` 动态拼装；该变量缺失时立即报错而非静默失败。
-- 响应含 `reasoning_content`（思考）字段，扩展的标准 `processDelta` 已按 thinking 块处理并回传历史（与 DeepSeek V4 一致）。
-- 免费额度按 Neurons 计费（非 token），且全平台共享日配额：编码场景单轮上下文动辄数万 token，输入消耗不可忽略（如 `qwen2.5-coder-32b` 输入高达 60,000 neurons/M，10 万 token 上下文 = 日额度的 60%）。轻量短对话一天几十次没问题；长上下文 agentic 任务请优先 SiliconFlow/Zen 等真免费档。
-
-#### 实测兼容性（2026-08，`/ai/v1/chat/completions` 端点）
-
-| 模型 | 纯对话 | 工具调用 (tool_calls) | 多轮历史回传 |
-|---|---|---|---|
-| `@cf/zai-org/glm-4.7-flash` | ✅ | ✅ 标准格式 | ✅ **agent 工作流首选** |
-| `@cf/qwen/qwen2.5-coder-32b-instruct` | ✅ | ⚠️ 以 `<tools>` XML 文本嵌入，**不走标准 tool_calls** | ⚠️ 仅适合纯对话/代码问答 |
-| `@cf/openai/gpt-oss-120b` | ✅ | ✅ 第一轮正常 | ❌ 回传历史报 400 schema 错误（CF 端已知限制） |
-| `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | ✅ | 未全测（24K 上下文，注意 max_tokens 已按实测收紧） | — |
-| `@cf/qwen/qwen3-30b-a3b-fp8` | ✅ | 未全测（32K 上下文，已按实测收紧） | — |
-| `@cf/deepseek-ai/deepseek-r1-distill-qwen-32b` | ✅ | 未全测（80K 上下文） | — |
-
-> 各模型实际上下文以本次实测为准：`llama-3.3-70b` = 24K、`qwen3-30b-a3b`/`qwen2.5-coder-32b` = 32K、`deepseek-r1-distill-qwen-32b` = 80K、其余 ≥131K。模型注册的 `contextWindow`/`maxTokens` 已按实测值收紧，避免 CF 端 400 超限错误。
-
-### 如何选择
-
-7 个额外供应商全部模型统一对比（基准数据截至 2026-08，来源：官方技术报告 + 独立评测）：
-
-| 供应商 | 模型 | 规模 | 上下文 | 能力定位 | 实测 |
-|---|---|---|---|---|---|
-| 硅基流动 | `nex-agi/Nex-N2-Pro` | 397B MoE (17B 激活) | 256K | 🏆 曾是免费旗舰编码/agent：SWE-Bench Pro 58.8、SWE Verified 80.8；2026-08 起转付费 | ❌ 转付费 |
-| 硅基流动 | `Qwen/Qwen3-8B` | 8B dense | 128K | 轻量通用，响应快（现免费档主力） | ✅ |
-| 硅基流动 | `deepseek-ai/DeepSeek-R1-0528-Qwen3-8B` | 8B dense (蒸馏) | 128K | 免费档内最强推理 | ✅ |
-| 魔塔社区 | `Qwen/Qwen3-Coder-30B-A3B-Instruct` | 30B MoE (3B 激活) | 128K | 中端编码向：SWE-bench Lite 49.7%（88 百分位）；**唯一开箱即用**的 ModelScope 模型 | ✅ |
-| 魔塔社区 | `deepseek-ai/DeepSeek-V4-Pro` | 1.6T MoE (49B 激活) | **1M** | 顶级推理 + **1M 超长上下文**（整仓库/长文档分析独一档）+ 中文世界知识第一（Chinese-SimpleQA 84.4，仅次 Gemini-3.1-Pro）；抽象推理偏弱（ARC-AGI-2 46%） | ❌ 需开通 |
-| NVIDIA | `openai/gpt-oss-20b` | 20B MoE (3.6B 激活) | 128K | ⭐ 免费档实测最快（TTFB 0.8s / ~130 tok/s）；GPT-OSS 家族数学/工具调用强，中文偏弱 | ✅ |
-| NVIDIA | `minimaxai/minimax-m3` | — | 128K | 快速推理模型（TTFB 0.8s / ~70 tok/s） | ✅ |
-| NVIDIA | `nvidia/nemotron-3-nano-30b-a3b` | 30B MoE (3B 激活) | 128K | NVIDIA 自家思考型轻量模型（~80 tok/s） | ✅ |
-| NVIDIA | `moonshotai/kimi-k3` | — | 128K | Moonshot 旗舰，NIM 端生成偏慢 | ⚠️ 慢 |
-| NVIDIA | `openai/gpt-oss-120b` | 117B MoE (5.1B 激活) | 128K | 数学/工具调用强（AIME 95.8）；中文致命伤；本地+CI 双网络持续超时，已从扩展移除 | ❌ 已移除 |
-| SenseNova | `glm-5.2` | — | 1M | 智谱旗舰长程任务：1M 上下文端到端开发管线 | ✅ |
-| SenseNova | `deepseek-v4-flash` | — | 1M | DeepSeek 高性能对话（thinking/非 thinking、工具调用） | ✅ |
-| SenseNova | `sensenova-6.8-flash-lite` | — | 256K | 新一代轻量多模态（文本+图像） | ✅ |
-| SenseNova | `sensenova-6.7-flash-lite` | — | 256K | 轻量多模态智能体（文本+图像） | ✅ |
-| Cloudflare | `@cf/zai-org/glm-4.7-flash` | — | 131K | 131K 上下文，**工具调用/agent 完整兼容**（CF 端实测最佳） | ✅ |
-| Cloudflare | `@cf/openai/gpt-oss-120b` | 117B MoE (5.1B 激活) | 128K | 编码/数学强，但**多轮工具历史回传不兼容**（单轮可用） | ⚠️ |
-| Cloudflare | `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | 70B | 24K（实测） | 最强 Llama 3.3，上下文小 | ✅ |
-| Cloudflare | `@cf/qwen/qwen2.5-coder-32b-instruct` | 32B | 32K（实测） | 代码专用，工具调用为 XML 文本（非标准） | ⚠️ |
-| Cloudflare | `@cf/google/gemma-4-26b-a4b-it` | 26B MoE (4B 激活) | 128K | 多模态（文本+图像） | ✅ |
-| Agnes | `agnes-2.5-flash` | — | 512K | 免费 512K 长上下文：编码专项、agent 工作流、工具调用、图像理解；全量升级版 | ✅ |
-| Agnes | `agnes-2.0-flash` | — | 512K | 免费，上一代快速模型（Claw-Eval 排名 #9，Pass³ 60.9%） | ✅ |
-| Agnes | `agnes-2.5-pro` | — | **1M** | 付费推理旗舰：高级编码、科学推理、长上下文分析、agent 终端任务（Artificial Analysis 智能排名 #9/153，TerminalBench v2.1 67.0%，GPQA 87.6%）；$0.45/M 输入、$0.90/M 输出 | ✅ |
-| Agnes | `agnes-2.5-pro-alpha` | — | **1M** | 打榜版付费推理（基准数据同 pro，付费） | ✅ |
-
-**场景选择矩阵：**
-
-| 场景 | 选它 |
-|---|---|
-| 日常编码 / agent 开发（默认主力） | 魔塔 `Qwen3-Coder-30B-A3B-Instruct`（免费中最强编码）；轻量快速用硅基 `Qwen3-8B`（免费） |
-| 免费长上下文（512K）/ 双站可选 | **Agnes `agnes-2.5-flash`**（国际站海外直连）或 `agnes-cn/agnes-2.5-flash`（中国站国内直连，速度更稳） |
-| 超长上下文 / 长程开发管线 | SenseNova `glm-5.2`（开箱即用）、魔塔 `DeepSeek-V4-Pro`（需开通额度）或 **Agnes `agnes-2.5-pro`**（1M，付费） |
-| 付费强推理（编码/科学/终端） | **Agnes `agnes-2.5-pro`**（1M 上下文，AA 智能榜 #9） |
-| 中文任务 | 硅基 `Qwen/Qwen3-8B`（免费）或魔塔 `DeepSeek-V4-Pro`（需开通，**勿用 GPT-OSS-120B**） |
-| 多模态（文本+图像） | SenseNova `sensenova-6.8-flash-lite`、Cloudflare `gemma-4-26b` 或 Agnes `agnes-2.5-flash` |
-| 英文数学、结构化输出 | **NVIDIA GPT-OSS-20B**（免费档实测最快） |
-| 海外网络兜底 / agent 工作流 | **Cloudflare `glm-4.7-flash`**（额度独立，工具调用完整兼容） |
-| 限流兜底、轻量快速 | ModelScope Qwen3-Coder-30B / 硅基 Qwen3-8B |
-
-**推荐组合**：主力 `modelscope/Qwen/Qwen3-Coder-30B-A3B-Instruct` + 兜底 `siliconflow/Qwen/Qwen3-8B`（额度独立，主力限流时顶上；硅基免费档 2026-08 收缩后仅剩 8B/9B 小模型，强推理任务可切 `siliconflow/deepseek-ai/DeepSeek-R1-0528-Qwen3-8B`）；国内长上下文/双通道用 `agnes-cn/agnes-2.5-flash`，长上下文推理/多模态需求切 SenseNova/Agnes，特殊场景按需切换。
-
-⚠️ 各平台免费额度均注明 "limited time"，模型可能随时下架/改名/转付费（NVIDIA 实测已下架 3 个模型），且免费期会话数据可能被用于改进模型，**勿发敏感内容、勿当生产依赖**。
+网关 schema 比 OpenAI 更严，**官方参数表未列出的字段一律拒收**（报错被替换成无信息量的 `Errors in message queue response`）。扩展内置 `cleanBody` 已处理：合并多条 `system` 消息、删除 `assistant.content: null`。`max_tokens` 按**每个模型**校验（`sensenova-6.8-flash-lite` 拒绝 65537，`glm-5.2` 接受 131072，`deepseek-v4-pro` 上限 393216），因此以模型注册值为准而非一个全局常量。思维链以 `delta.reasoning` 回传（不是 `reasoning_content`），扩展两种都接收。
 
 ## opencode 原生集成
 
 上述 `sensenova` provider 也可通过 [opencode 自定义 provider](https://opencode.ai/docs/providers) 直接配置，**无需本扩展**。opencode 原生集成走 `@ai-sdk/openai-compatible`，不依赖自定义 streamSimple，但也不含扩展内置的 `cleanBody` 消息清洗（合并 system 消息、删 `content: null`）。
-
-### Cloudflare Workers AI（内置 provider，零配置）
-
-opencode **原生内置** `cloudflare-workers-ai` provider，只需设置环境变量（与 pi 扩展共用）：
-
-```bash
-export CLOUDFLARE_ACCOUNT_ID=your-32-character-account-id
-export CLOUDFLARE_API_KEY=your-api-token
-```
-
-TUI 内 `/models` 即可看到 `cloudflare-workers-ai/@cf/...` 全部免费模型。为避免误用付费额度，建议在配置中 blacklist 付费模型（本仓库 README 上方配置示例已含）：
-
-```json
-{
-  "provider": {
-    "cloudflare-workers-ai": {
-      "blacklist": [
-        "@cf/deepseek-ai/deepseek-v4-flash-0731",
-        "@cf/deepseek-ai/deepseek-v4-pro-0813",
-        "@cf/zai-org/glm-5.2",
-        "@cf/moonshotai/kimi-k2.6",
-        "@cf/moonshotai/kimi-k2.7-code"
-      ]
-    }
-  }
-}
-```
-
-```bash
-# CLI
-opencode run -m cloudflare-workers-ai/@cf/openai/gpt-oss-120b "你好"
-opencode run -m cloudflare-workers-ai/@cf/qwen/qwen2.5-coder-32b-instruct "你好"
-```
 
 ### 配置
 
@@ -500,134 +237,20 @@ opencode run -m cloudflare-workers-ai/@cf/qwen/qwen2.5-coder-32b-instruct "你�
           "reasoning": true,
           "tool_call": true,
           "cost": { "input": 0, "output": 0 }
-        }
-      }
-    },
-    "siliconflow": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "硅基流动 (SiliconFlow)",
-      "options": {
-        "baseURL": "https://api.siliconflow.cn/v1",
-        "apiKey": "{env:SILICONFLOW_API_KEY}"
-      },
-      "models": {
-        "Qwen/Qwen3-8B": {
-          "name": "Qwen3-8B (免费)",
-          "limit": { "context": 131072, "output": 65536 },
-          "reasoning": true, "tool_call": true,
-          "cost": { "input": 0, "output": 0 }
         },
-        "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B": {
-          "name": "DeepSeek-R1-0528-Qwen3-8B (免费推理)",
-          "limit": { "context": 131072, "output": 65536 },
-          "reasoning": true, "tool_call": false,
-          "cost": { "input": 0, "output": 0 }
-        }
-      }
-    },
-    "modelscope": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "魔塔社区 (ModelScope)",
-      "options": {
-        "baseURL": "https://api-inference.modelscope.cn/v1",
-        "apiKey": "{env:MODELSCOPE_API_KEY}"
-      },
-      "models": {
-        "Qwen/Qwen3-Coder-30B-A3B-Instruct": {
-          "name": "Qwen3-Coder-30B",
-          "limit": { "context": 131072, "output": 65536 },
-          "reasoning": true, "tool_call": true,
-          "cost": { "input": 0, "output": 0 }
-        },
-        "deepseek-ai/DeepSeek-V4-Pro": {
-          "name": "DeepSeek V4 Pro (需在控制台开通额度)",
+        "deepseek-v4-pro": {
+          "name": "DeepSeek V4 Pro (via SenseNova)",
           "limit": { "context": 1048576, "output": 65536 },
-          "reasoning": true, "tool_call": true,
-          "cost": { "input": 0, "output": 0 }
-        }
-      }
-    },
-    "nvidia": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "NVIDIA NIM",
-      "options": {
-        "baseURL": "https://integrate.api.nvidia.com/v1",
-        "apiKey": "{env:NVIDIA_NIM_API_KEY}"
-      },
-      "models": {
-        "openai/gpt-oss-120b": {
-          "name": "GPT-OSS 120B",
-          "limit": { "context": 131072, "output": 65536 },
-          "reasoning": true, "tool_call": true,
-          "cost": { "input": 0, "output": 0 }
-        }
-      }
-    },
-    "agnes": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "Agnes AI (国际站)",
-      "options": {
-        "baseURL": "https://apihub.agnes-ai.com/v1",
-        "apiKey": "{env:AGNES_API_KEY}"
-      },
-      "models": {
-        "agnes-2.5-flash": {
-          "name": "Agnes 2.5 Flash",
-          "limit": { "context": 512000, "output": 65536 },
-          "reasoning": true, "tool_call": true, "attachment": true,
+          "reasoning": true,
+          "tool_call": true,
           "cost": { "input": 0, "output": 0 }
         },
-        "agnes-2.0-flash": {
-          "name": "Agnes 2.0 Flash",
-          "limit": { "context": 512000, "output": 65536 },
-          "reasoning": true, "tool_call": true, "attachment": true,
-          "cost": { "input": 0, "output": 0 }
-        },
-        "agnes-2.5-pro": {
-          "name": "Agnes 2.5 Pro",
+        "kimi-k3": {
+          "name": "Kimi K3 (via SenseNova)",
           "limit": { "context": 1048576, "output": 65536 },
-          "reasoning": true, "tool_call": true,
-          "cost": { "input": 0.45, "output": 0.9 }
-        },
-        "agnes-2.5-pro-alpha": {
-          "name": "Agnes 2.5 Pro Alpha",
-          "limit": { "context": 1048576, "output": 65536 },
-          "reasoning": true, "tool_call": true,
-          "cost": { "input": 0.45, "output": 0.9 }
-        }
-      }
-    },
-    "agnes-cn": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "Agnes AI (中国站)",
-      "options": {
-        "baseURL": "https://api.agnes-ai.cn/v1",
-        "apiKey": "{env:AGNES_CN_API_KEY}"
-      },
-      "models": {
-        "agnes-2.5-flash": {
-          "name": "Agnes 2.5 Flash",
-          "limit": { "context": 512000, "output": 65536 },
-          "reasoning": true, "tool_call": true, "attachment": true,
+          "reasoning": true,
+          "tool_call": true,
           "cost": { "input": 0, "output": 0 }
-        },
-        "agnes-2.0-flash": {
-          "name": "Agnes 2.0 Flash",
-          "limit": { "context": 512000, "output": 65536 },
-          "reasoning": true, "tool_call": true, "attachment": true,
-          "cost": { "input": 0, "output": 0 }
-        },
-        "agnes-2.5-pro": {
-          "name": "Agnes 2.5 Pro",
-          "limit": { "context": 1048576, "output": 65536 },
-          "reasoning": true, "tool_call": true,
-          "cost": { "input": 0.45, "output": 0.9 }
-        },
-        "agnes-2.5-pro-alpha": {
-          "name": "Agnes 2.5 Pro Alpha",
-          "limit": { "context": 1048576, "output": 65536 },
-          "reasoning": true, "tool_call": true,
-          "cost": { "input": 0.45, "output": 0.9 }
         }
       }
     }
@@ -640,11 +263,6 @@ opencode run -m cloudflare-workers-ai/@cf/qwen/qwen2.5-coder-32b-instruct "你�
 ```bash
 # CLI
 opencode run -m sensenova/sensenova-6.7-flash-lite "你好"
-opencode run -m siliconflow/Qwen/Qwen3-8B "你好"
-opencode run -m modelscope/Qwen/Qwen3-Coder-30B-A3B-Instruct "你好"
-opencode run -m nvidia/openai/gpt-oss-20b "你好"
-opencode run -m agnes/agnes-2.5-flash "你好"
-opencode run -m agnes-cn/agnes-2.5-flash "你好"
 
 # 设为默认模型
 opencode.json → "model": "sensenova/glm-5.2"
@@ -665,10 +283,10 @@ opencode 原生方式不经过 `cleanBody`，但实测标准对话/工具调用�
 
 ## 注意事项
 
-1. **模型歧义**：若机器上也配置了 pi 内置 `opencode` provider 且带 key，裸 `--model hy3-free` 等模型 ID 会报 "ambiguous across providers"。解决：显式 `--provider opencode-zen`，或删除内置 opencode 的 key，或将 defaultProvider 设为 `opencode-zen`。
+1. **模型歧义**：若机器上也配置了 pi 内置 `opencode` provider 且带 key，裸 `--model big-pickle` 等模型 ID 会报 "ambiguous across providers"。解决：显式 `--provider opencode-zen`，或删除内置 opencode 的 key，或将 defaultProvider 设为 `opencode-zen`。
 2. **限流是共享的**：匿名 `public` key 的免费额度是全 Zen 用户共享的（社区实测约 200 请求/天兜底，官方未公布固定配额），到达后返回 429 `FreeUsageLimitError`，需等待重置。人越多额度越紧张。
 3. **UA 门可能变化**：本扩展写死 `User-Agent: opencode/1.15.5`。OpenCode 官方若调整版本号或免费门控策略，免费通道可能失效，需同步更新本文件中的 `OPENCODE_STATIC_HEADERS`。
-4. **数据条款**：免费模型的免费期内，**提交的数据可能被用于改进模型**（官方隐私声明明确例外）。切勿发送敏感/机密内容。`nemotron-*` 为 NVIDIA 试用端点，禁止提交个人或机密数据，会话会被记录。
+4. **数据条款**：免费模型的免费期内，**提交的数据可能被用于改进模型**（官方隐私声明明确例外）。切勿发送敏感/机密内容。
 5. **免费是限时的**：官方措辞为 "available for a limited time"，模型可能随时下架、改名或转为付费，不适合作为生产依赖。
 6. **单文件可审计**：整个扩展就是一个 `.mjs` 文件，使用前建议通读确认无异常行为。
 7. **代理会导致 500**：Zen API 请求**不能走 HTTP 代理**（实测经 v2rayN/Clash 等代理转发返回 500 Internal server error，直连正常）。若系统全局代理已开启（Windows WinINET），node/bun 的 fetch 默认不读系统代理所以不受影响，但请勿为此扩展显式设置 `HTTPS_PROXY`/`HTTP_PROXY` 环境变量指向代理。

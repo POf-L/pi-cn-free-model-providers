@@ -351,8 +351,8 @@ function makeOutput(model) {
 }
 
 // ── Verified image-generation models ---------------------------------------
-// Agnes and SenseNova expose OpenAI-compatible image-generation endpoints.
-// Keep this separate from the generic chat stream: their image responses are
+// SenseNova exposes OpenAI-compatible image-generation endpoints.
+// Keep this separate from the generic chat stream: its image responses are
 // not chat-completion SSE messages and need to be saved/echoed explicitly.
 let appendNativeImage = null;
 
@@ -366,21 +366,6 @@ function latestImageRequest(context) {
     prompt: parts.filter((part) => part?.type === "text").map((part) => part.text ?? "").join("\n"),
     images: parts.filter((part) => part?.type === "image"),
   };
-}
-
-function latestAudioRequest(context) {
-  const messages = Array.isArray(context?.messages) ? context.messages : [];
-  const user = [...messages].reverse().find((message) => message?.role === "user");
-  if (!user || typeof user.content === "string") return { audios: [] };
-  const parts = Array.isArray(user.content) ? user.content : [];
-  const audios = parts
-    .filter((part) => part?.type === "audio" || (part?.mimeType ?? "").startsWith("audio/"))
-    .map((part) => ({
-      data: part?.data ?? part?.audio_url?.url ?? part?.audioUrl ?? "",
-      mimeType: part?.mimeType ?? "audio/wav",
-    }))
-    .filter((audio) => audio.data);
-  return { audios };
 }
 
 async function saveNativeImage(image, modelId) {
@@ -402,349 +387,6 @@ async function saveNativeImage(image, modelId) {
   return { path, mimeType };
 }
 
-async function saveNativeAudio(bytes, modelId, extension = "mp3") {
-  const directory = join(process.cwd(), ".pi", "generated-audio");
-  if (!existsSync(directory)) mkdirSync(directory, { recursive: true });
-  const path = join(directory, `opencode-${modelId.replaceAll("/", "_")}-${Date.now()}.${extension}`);
-  writeFileSync(path, Buffer.from(bytes));
-  return path;
-}
-
-function streamNativeAudio(model, context, options) {
-  const stream = new AssistantMessageEventStream();
-  const output = makeOutput(model);
-  (async () => {
-    try {
-      stream.push({ type: "start", partial: output });
-      const prompt = latestImageRequest(context).prompt;
-      if (!prompt) throw new Error("TTS requires text input");
-      const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
-      const apiKey = process.env.CLOUDFLARE_API_KEY;
-      if (!accountId || !apiKey) throw new Error("CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_KEY are required for TTS");
-      const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model.id}`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ text: prompt }),
-        signal: options?.signal,
-      });
-      if (!response.ok) throw new Error(`Cloudflare TTS HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
-      const path = await saveNativeAudio(await response.arrayBuffer(), model.id, "mp3");
-      const text = `Generated audio saved to: ${fileLink(path)}`;
-      output.content.push({ type: "text", text });
-      stream.push({ type: "text_start", contentIndex: 0, partial: output });
-      stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: output });
-      stream.push({ type: "text_end", contentIndex: 0, content: text, partial: output });
-      output.stopReason = "stop";
-      stream.push({ type: "done", reason: "stop", message: output });
-      stream.end();
-    } catch (error) {
-      output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-      output.errorMessage = error instanceof Error ? error.message : String(error);
-      stream.push({ type: "error", reason: "error", error: output });
-      stream.end();
-    }
-  })();
-  return stream;
-}
-
-async function saveNativeTranscript(text, modelId) {
-  const directory = join(process.cwd(), ".pi", "generated-transcripts");
-  if (!existsSync(directory)) mkdirSync(directory, { recursive: true });
-  const path = join(directory, `opencode-${modelId.replaceAll("/", "_")}-${Date.now()}.txt`);
-  writeFileSync(path, text, "utf-8");
-  return path;
-}
-
-// Cloudflare Workers AI speech-to-text. Two verified transports:
-//  • whisper (`@cf/openai/whisper`): POST JSON `{ audio: <0–255 byte array> }`;
-//    a base64 string / object is rejected with HTTP 400. Response `{ result: { text } }`.
-//  • Deepgram nova (`@cf/deepgram/nova-3`, flag opencodeAsrRawBody): POST the raw
-//    audio bytes as the request body with `Content-Type: audio/*`. Response:
-//    `{ result: { results: { channels: [{ alternatives: [{ transcript }] }] } } }`.
-// Both decode the attached audio's base64 `data` before sending.
-function streamNativeTranscription(model, context, options) {
-  const stream = new AssistantMessageEventStream();
-  const output = makeOutput(model);
-  (async () => {
-    try {
-      stream.push({ type: "start", partial: output });
-      const { audios } = latestAudioRequest(context);
-      if (audios.length === 0) throw new Error("Transcription requires an audio input (attach an audio file)");
-      const audio = audios[0];
-      const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
-      const apiKey = process.env.CLOUDFLARE_API_KEY;
-      if (!accountId || !apiKey) throw new Error("CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_KEY are required for transcription");
-      const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model.id}`;
-      let response;
-      if (model.opencodeAsrRawBody) {
-        // Deepgram nova: raw audio bytes as the body, with an audio/* Content-Type
-        response = await fetch(url, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": audio.mimeType || "audio/wav" },
-          body: Buffer.from(audio.data, "base64"),
-          signal: options?.signal,
-        });
-      } else {
-        // whisper: { audio: <0–255 byte array> } as JSON
-        let audioBytes;
-        try {
-          audioBytes = Array.from(Buffer.from(audio.data, "base64"));
-        } catch {
-          throw new Error("Failed to decode attached audio (expected base64)");
-        }
-        response = await fetch(url, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ audio: audioBytes }),
-          signal: options?.signal,
-        });
-      }
-      if (!response.ok) throw new Error(`Cloudflare transcription HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
-      const payload = await response.json();
-      const result = payload?.result ?? payload;
-      const transcript =
-        result?.text ??
-        result?.transcript ??
-        result?.results?.channels?.[0]?.alternatives?.[0]?.transcript ??
-        payload?.text ??
-        "";
-      if (!transcript) throw new Error("Transcription returned no text");
-      const path = await saveNativeTranscript(transcript, model.id);
-      const text = `Transcription (${model.id}):\n\n${transcript}\n\nSaved transcript to: ${fileLink(path)}`;
-      output.content.push({ type: "text", text });
-      stream.push({ type: "text_start", contentIndex: 0, partial: output });
-      stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: output });
-      stream.push({ type: "text_end", contentIndex: 0, content: text, partial: output });
-      output.stopReason = "stop";
-      stream.push({ type: "done", reason: "stop", message: output });
-      stream.end();
-    } catch (error) {
-      output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-      output.errorMessage = error instanceof Error ? error.message : String(error);
-      stream.push({ type: "error", reason: "error", error: output });
-      stream.end();
-    }
-  })();
-  return stream;
-}
-
-// Generic OpenAI-compatible audio endpoints: POST `{baseUrl}/audio/speech` for
-// TTS and `{baseUrl}/audio/transcriptions` (multipart) for ASR. Used by
-// SiliconFlow and ModelScope. SiliconFlow's shape is verified; ModelScope's
-// audio compatibility is unverified (no API key in this environment) and may
-// need a different path / voice-reference params.
-function streamOpenAITTS(model, context, options, baseUrl, envKey) {
-  const stream = new AssistantMessageEventStream();
-  const output = makeOutput(model);
-  (async () => {
-    try {
-      stream.push({ type: "start", partial: output });
-      const prompt = latestImageRequest(context).prompt;
-      if (!prompt) throw new Error("TTS requires text input");
-      const apiKey = process.env[envKey];
-      if (!apiKey) throw new Error(`${envKey} is required for TTS`);
-      const response = await fetch(`${baseUrl}/audio/speech`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model: model.id, input: prompt, voice: model.opencodeVoice ?? "female", response_format: "mp3" }),
-        signal: options?.signal,
-      });
-      if (!response.ok) throw new Error(`TTS HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
-      const bytes = Buffer.from(await response.arrayBuffer());
-      const path = await saveNativeAudio(bytes, model.id, "mp3");
-      const text = `Speech generated (${model.id}):\n\nSaved audio to: ${fileLink(path)}`;
-      output.content.push({ type: "text", text });
-      stream.push({ type: "text_start", contentIndex: 0, partial: output });
-      stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: output });
-      stream.push({ type: "text_end", contentIndex: 0, content: text, partial: output });
-      output.stopReason = "stop";
-      stream.push({ type: "done", reason: "stop", message: output });
-      stream.end();
-    } catch (error) {
-      output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-      output.errorMessage = error instanceof Error ? error.message : String(error);
-      stream.push({ type: "error", reason: "error", error: output });
-      stream.end();
-    }
-  })();
-  return stream;
-}
-
-function streamOpenAIASR(model, context, options, baseUrl, envKey) {
-  const stream = new AssistantMessageEventStream();
-  const output = makeOutput(model);
-  (async () => {
-    try {
-      stream.push({ type: "start", partial: output });
-      const { audios } = latestAudioRequest(context);
-      if (audios.length === 0) throw new Error("Transcription requires an audio input (attach an audio file)");
-      const audio = audios[0];
-      const apiKey = process.env[envKey];
-      if (!apiKey) throw new Error(`${envKey} is required for transcription`);
-      const fd = new FormData();
-      fd.append("file", new Blob([Buffer.from(audio.data, "base64")], { type: audio.mimeType || "audio/wav" }), "audio");
-      fd.append("model", model.id);
-      const response = await fetch(`${baseUrl}/audio/transcriptions`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}` },
-        body: fd,
-        signal: options?.signal,
-      });
-      if (!response.ok) throw new Error(`ASR HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
-      const payload = await response.json().catch(() => null);
-      const transcript = payload?.text ?? payload?.transcript ?? (typeof payload === "string" ? payload : "");
-      if (!transcript) throw new Error("Transcription returned no text");
-      const path = await saveNativeTranscript(transcript, model.id);
-      const text = `Transcription (${model.id}):\n\n${transcript}\n\nSaved transcript to: ${fileLink(path)}`;
-      output.content.push({ type: "text", text });
-      stream.push({ type: "text_start", contentIndex: 0, partial: output });
-      stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: output });
-      stream.push({ type: "text_end", contentIndex: 0, content: text, partial: output });
-      output.stopReason = "stop";
-      stream.push({ type: "done", reason: "stop", message: output });
-      stream.end();
-    } catch (error) {
-      output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-      output.errorMessage = error instanceof Error ? error.message : String(error);
-      stream.push({ type: "error", reason: "error", error: output });
-      stream.end();
-    }
-  })();
-  return stream;
-}
-
-async function saveNativeVideo(url, modelId) {
-  const directory = join(process.cwd(), ".pi", "generated-videos");
-  if (!existsSync(directory)) mkdirSync(directory, { recursive: true });
-  const path = join(directory, `opencode-${modelId}-${Date.now()}.mp4`);
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`Unable to download generated video: HTTP ${response.status}`);
-  writeFileSync(path, Buffer.from(await response.arrayBuffer()));
-  return path;
-}
-
-async function waitForNativeVideo(baseUrl, videoId, apiKey, signal) {
-  const deadline = Date.now() + 30 * 60 * 1000;
-  const apiRoot = baseUrl.replace(/\/v1\/?$/, "");
-  while (Date.now() < deadline) {
-    if (signal?.aborted) throw new Error("Video generation aborted");
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(resolve, 5000);
-      signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("Video generation aborted")); }, { once: true });
-    });
-    const response = await fetch(`${apiRoot}/agnesapi?video_id=${encodeURIComponent(videoId)}`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      signal,
-    });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload?.error?.message ?? `Video status HTTP ${response.status}`);
-    if (payload.status === "completed") return payload;
-    if (payload.status === "failed") throw new Error(payload?.error?.message ?? "Video generation failed");
-  }
-  throw new Error("Video generation timed out after 30 minutes");
-}
-
-function streamNativeVideo(model, context, options) {
-  const stream = new AssistantMessageEventStream();
-  const output = makeOutput(model);
-  (async () => {
-    try {
-      stream.push({ type: "start", partial: output });
-      const { prompt, images } = latestImageRequest(context);
-      if (!prompt) throw new Error("Video generation requires a text prompt");
-      if (model.opencodeVideoProvider === "siliconflow") {
-        const baseUrl = "https://api.siliconflow.cn/v1";
-        const apiKey = process.env.SILICONFLOW_API_KEY ?? "";
-        if (!apiKey) throw new Error("SILICONFLOW_API_KEY is required for video generation");
-        const body = { model: model.id, prompt, image_size: model.opencodeVideoSize ?? "1280x720" };
-        if (images.length) body.image = `data:${images[0].mimeType};base64,${images[0].data}`;
-        const subRes = await fetch(`${baseUrl}/video/submit`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-          signal: options?.signal,
-        });
-        const sub = await subRes.json();
-        if (!subRes.ok) throw new Error(sub?.message ?? sub?.error?.message ?? `Video submit HTTP ${subRes.status}`);
-        const requestId = sub?.requestId ?? sub?.request_id ?? sub?.task_id ?? sub?.taskId;
-        if (!requestId) throw new Error("Video submit returned no requestId");
-        const deadline = Date.now() + 30 * 60 * 1000;
-        let result;
-        while (Date.now() < deadline) {
-          if (options?.signal?.aborted) throw new Error("Video generation aborted");
-          await new Promise((resolve, reject) => {
-            const timer = setTimeout(resolve, 5000);
-            options?.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("Video generation aborted")); }, { once: true });
-          });
-          const stRes = await fetch(`${baseUrl}/video/status`, {
-            method: "POST",
-            headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-            body: JSON.stringify({ requestId }),
-            signal: options?.signal,
-          });
-          const st = await stRes.json();
-          if (!stRes.ok) throw new Error(st?.message ?? st?.error?.message ?? `Video status HTTP ${stRes.status}`);
-          const status = st?.status ?? st?.data?.status ?? st?.statuses?.status;
-          if (["Succeed", "Succeeded", "completed", "success"].includes(status)) { result = st; break; }
-          if (["Failed", "failed", "error"].includes(status)) throw new Error(st?.message ?? st?.error?.message ?? "Video generation failed");
-        }
-        if (!result) throw new Error("Video generation timed out after 30 minutes");
-        const url = result?.results?.videos?.[0]?.url ?? result?.video_url ?? result?.url ?? result?.data?.video_url;
-        if (!url) throw new Error("Video status returned no video url");
-        const path = await saveNativeVideo(url, model.id);
-        const text = `Generated video saved to: ${fileLink(path)}\n\nVideo URL: ${url}`;
-        output.content.push({ type: "text", text });
-        stream.push({ type: "text_start", contentIndex: 0, partial: output });
-        stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: output });
-        stream.push({ type: "text_end", contentIndex: 0, content: text, partial: output });
-        output.stopReason = "stop";
-        stream.push({ type: "done", reason: "stop", message: output });
-        stream.end();
-        return;
-      }
-      const isCN = model.opencodeImageProvider === "agnes-cn";
-      const baseUrl = isCN ? "https://api.agnes-ai.cn/v1" : "https://apihub.agnes-ai.com/v1";
-      const envKey = isCN ? "AGNES_CN_API_KEY" : "AGNES_API_KEY";
-      const body = {
-        model: model.id,
-        prompt,
-        ...(images.length === 1 ? { image: `data:${images[0].mimeType};base64,${images[0].data}` } : {}),
-        ...(images.length > 1 ? { extra_body: { image: images.map((image) => `data:${image.mimeType};base64,${image.data}`), mode: "keyframes" } } : {}),
-        num_frames: 121,
-        frame_rate: 24,
-      };
-      const response = await fetch(`${baseUrl}/videos`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${process.env[envKey] ?? ""}`, "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-        signal: options?.signal,
-      });
-      const task = await response.json();
-      if (!response.ok) throw new Error(task?.error?.message ?? `Video API HTTP ${response.status}`);
-      const videoId = task.video_id ?? task.id ?? task.task_id;
-      if (!videoId) throw new Error("Video API returned no video_id");
-      const result = task.status === "completed" ? task : await waitForNativeVideo(baseUrl, videoId, process.env[envKey] ?? "", options?.signal);
-      const url = result?.metadata?.url;
-      if (!url) throw new Error("Video API returned no metadata.url");
-      const path = await saveNativeVideo(url, model.id);
-      const text = `Generated video saved to: ${fileLink(path)}\n\nVideo URL: ${url}`;
-      output.content.push({ type: "text", text });
-      stream.push({ type: "text_start", contentIndex: 0, partial: output });
-      stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: output });
-      stream.push({ type: "text_end", contentIndex: 0, content: text, partial: output });
-      output.stopReason = "stop";
-      stream.push({ type: "done", reason: "stop", message: output });
-      stream.end();
-    } catch (error) {
-      output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-      output.errorMessage = error instanceof Error ? error.message : String(error);
-      stream.push({ type: "error", reason: output.stopReason, error: output });
-      stream.end();
-    }
-  })();
-  return stream;
-}
-
 function streamNativeImage(model, context, options) {
   const stream = new AssistantMessageEventStream();
   const output = makeOutput(model);
@@ -753,64 +395,24 @@ function streamNativeImage(model, context, options) {
       stream.push({ type: "start", partial: output });
       const { prompt, images } = latestImageRequest(context);
       if (!prompt) throw new Error("Image generation requires a text prompt");
-      const isSenseNova = model.opencodeImageProvider === "sensenova";
-      const isSiliconFlow = model.opencodeImageProvider === "siliconflow";
-      const isAgnesCN = model.opencodeImageProvider === "agnes-cn";
-      const isCloudflare = model.opencodeImageProvider === "cloudflare";
-      if (isCloudflare) {
-        const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
-        const apiKey = process.env.CLOUDFLARE_API_KEY;
-        if (!accountId || !apiKey) throw new Error("CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_KEY are required for image generation");
-        const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model.id}`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt }),
-          signal: options?.signal,
-        });
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload?.errors?.[0]?.message ?? `Cloudflare image API HTTP ${response.status}`);
-        const saved = await saveNativeImage({ b64_json: payload?.result?.image, mime_type: "image/jpeg" }, model.id);
-        const text = `Generated image saved to: ${fileLink(saved.path)}`;
-        output.content.push({ type: "text", text });
-        stream.push({ type: "text_start", contentIndex: 0, partial: output });
-        stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: output });
-        stream.push({ type: "text_end", contentIndex: 0, content: text, partial: output });
-        appendNativeImage?.(saved);
-        output.stopReason = "stop";
-        stream.push({ type: "done", reason: "stop", message: output });
-        stream.end();
-        return;
-      }
-      const baseUrl = isSenseNova
-        ? "https://token.sensenova.cn/v1"
-        : isSiliconFlow
-          ? "https://api.siliconflow.cn/v1"
-          : isAgnesCN
-            ? "https://api.agnes-ai.cn/v1"
-            : "https://apihub.agnes-ai.com/v1";
-      const envKey = isSenseNova ? "SENSENOVA_API_KEY" : isSiliconFlow ? "SILICONFLOW_API_KEY" : isAgnesCN ? "AGNES_CN_API_KEY" : "AGNES_API_KEY";
-      const endpoint = isSenseNova && images.length ? `${baseUrl}/images/edits` : `${baseUrl}/images/generations`;
-      const body = isSiliconFlow
-        ? { model: model.id, prompt, n: 1, response_format: "url" }
-        : isSenseNova
-          ? {
-            model: model.id,
-            prompt,
-            n: 1,
-            response_format: "url",
-            output_format: "png",
-            ...(images.length ? { images: images.map((image) => ({ image_url: `data:${image.mimeType};base64,${image.data}` })) } : {}),
-          }
-        : {
-            model: model.id,
-            prompt,
-            n: 1,
-            extra_body: { response_format: "url" },
-            ...(images.length === 1 ? { image: `data:${images[0].mimeType};base64,${images[0].data}` } : {}),
-          };
+      // SenseNova is the only registered provider with a native image endpoint:
+      // /images/generations for text-to-image, /images/edits once an image is
+      // attached. response_format/output_format are required by its schema.
+      const baseUrl = "https://token.sensenova.cn/v1";
+      const apiKey = process.env.SENSENOVA_API_KEY ?? readAgentAuthKey("sensenova") ?? "";
+      if (!apiKey) throw new Error("SENSENOVA_API_KEY (or a stored sensenova key) is required for image generation");
+      const endpoint = images.length ? `${baseUrl}/images/edits` : `${baseUrl}/images/generations`;
+      const body = {
+        model: model.id,
+        prompt,
+        n: 1,
+        response_format: "url",
+        output_format: "png",
+        ...(images.length ? { images: images.map((image) => ({ image_url: `data:${image.mimeType};base64,${image.data}` })) } : {}),
+      };
       const response = await fetch(endpoint, {
         method: "POST",
-        headers: { Authorization: `Bearer ${process.env[envKey] ?? ""}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
         body: JSON.stringify(body),
         signal: options?.signal,
       });
@@ -845,8 +447,7 @@ function streamNativeImage(model, context, options) {
 // our curated lists get updated. Recognize them and attach an actionable hint:
 // - 404 / "not found" / 已下线 → model deprecated or renamed;
 // - insufficient-balance → if the model is curated as free, that label is stale
-//   (it turned paid and just tried to bill the user). See also:
-//   .github/workflows/siliconflow-watch.yml (weekly official-announcements poll).
+//   (it turned paid and just tried to bill the user).
 function explainModelChurn(status, errText) {
   const t = String(errText).toLowerCase();
   if (
@@ -854,10 +455,10 @@ function explainModelChurn(status, errText) {
     /model[\w-]{0,24}(not found|not exist|does not exist)/.test(t) ||
     /(已下线|已不再提供|不存在|deprecated|no longer available)/.test(t)
   ) {
-    return "Hint: this model may have been deprecated/renamed by the provider — check 模型广场 (https://cloud.siliconflow.cn/me/models) and update the curated list.";
+    return "Hint: this model may have been deprecated/renamed by the provider — check the provider's /v1/models and update the curated list.";
   }
   if (/insufficient[ _-]?balance|余额不足/.test(t)) {
-    return "Hint: rejected for insufficient balance — if this model is labeled 免费 in the curated list, that label is stale (it has turned PAID). Update SILICONFLOW_MODELS accordingly.";
+    return "Hint: rejected for insufficient balance — if this model is labeled free in the curated list, that label is stale (it has turned PAID). Update the curated list accordingly.";
   }
   return "";
 }
@@ -935,79 +536,6 @@ const streamSenseNovaChat = makeOpenAIStream("https://token.sensenova.cn/v1", "S
 const streamSenseNova = (model, context, options) =>
   model.opencodeImageModel ? streamNativeImage(model, context, options) : streamSenseNovaChat(model, context, options);
 
-// Standard OpenAI-compatible providers
-const SF_URL = "https://api.siliconflow.cn/v1";
-const streamSiliconFlowChat = makeOpenAIStream(SF_URL, "SILICONFLOW_API_KEY");
-const streamSiliconFlow = (model, context, options) => {
-  if (model.opencodeTranscriptionModel) return streamOpenAIASR(model, context, options, SF_URL, "SILICONFLOW_API_KEY");
-  if (model.opencodeAudioModel) return streamOpenAITTS(model, context, options, SF_URL, "SILICONFLOW_API_KEY");
-  if (model.opencodeImageModel) return streamNativeImage(model, context, options);
-  if (model.opencodeVideoModel) return streamNativeVideo(model, context, options);
-  return streamSiliconFlowChat(model, context, options);
-};
-const MS_URL = "https://api-inference.modelscope.cn/v1";
-const streamModelScopeChat = makeOpenAIStream(MS_URL, "MODELSCOPE_API_KEY", { maxTokens: 65536 });
-const streamModelScope = (model, context, options) => {
-  if (model.opencodeTranscriptionModel) return streamOpenAIASR(model, context, options, MS_URL, "MODELSCOPE_API_KEY");
-  if (model.opencodeAudioModel) return streamOpenAITTS(model, context, options, MS_URL, "MODELSCOPE_API_KEY");
-  return streamModelScopeChat(model, context, options);
-};
-const streamNvidia = makeOpenAIStream("https://integrate.api.nvidia.com/v1", "NVIDIA_NIM_API_KEY");
-
-// Agnes AI — OpenAI-compatible gateway (apihub.agnes-ai.com = 国际站,
-// api.agnes-ai.cn = 中国站). Same model lineup on both. Supports
-// image_url input (base64 data URLs work), tool calling, and thinking mode
-// via chat_template_kwargs.enable_thinking (wired to pi's thinkingLevel).
-// https://www.agnes-ai.com/zh-Hans/docs/overview
-const streamAgnesChat = makeOpenAIStream("https://apihub.agnes-ai.com/v1", "AGNES_API_KEY", {
-  maxTokens: 65536,
-  enableThinking: true,
-});
-const streamAgnesCNChat = makeOpenAIStream("https://api.agnes-ai.cn/v1", "AGNES_CN_API_KEY", {
-  maxTokens: 65536,
-  enableThinking: true,
-});
-const streamAgnes = (model, context, options) =>
-  model.opencodeVideoModel
-    ? streamNativeVideo(model, context, options)
-    : model.opencodeImageModel
-      ? streamNativeImage(model, context, options)
-      : streamAgnesChat(model, context, options);
-const streamAgnesCN = (model, context, options) =>
-  model.opencodeVideoModel
-    ? streamNativeVideo(model, context, options)
-    : model.opencodeImageModel
-      ? streamNativeImage(model, context, options)
-      : streamAgnesCNChat(model, context, options);
-
-// Cloudflare Workers AI — official OpenAI-compatible endpoint.
-// https://developers.cloudflare.com/workers-ai/configuration/open-ai-compatibility/
-// The account id is embedded in the URL path, so the base URL is built from
-// CLOUDFLARE_ACCOUNT_ID at request time (cannot use makeOpenAIStream's static
-// baseUrl). Free tier: 10,000 neurons/day (UTC reset); the 5 frontier models
-// (deepseek-v4-flash/pro, glm-5.2, kimi-k2.6/k2.7-code) require paid billing
-// and are intentionally NOT registered here.
-const streamCloudflare = (model, context, options) => {
-  if (model.opencodeTranscriptionModel) return streamNativeTranscription(model, context, options);
-  if (model.opencodeImageModel) return streamNativeImage(model, context, options);
-  if (model.opencodeAudioModel) return streamNativeAudio(model, context, options);
-  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
-  if (!accountId) {
-    const stream = new AssistantMessageEventStream();
-    const output = makeOutput(model);
-    output.stopReason = "error";
-    output.errorMessage = "CLOUDFLARE_ACCOUNT_ID env var is not set; cannot build Workers AI endpoint URL";
-    stream.push({ type: "error", reason: "error", error: output });
-    try { stream.end(); } catch {}
-    return stream;
-  }
-  return makeOpenAIStream(
-    `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1`,
-    "CLOUDFLARE_API_KEY",
-    { maxTokens: (model) => model.maxTokens ?? 65536 }
-  )(model, context, options);
-};
-
 async function run(stream, output, model, context, options, cfg) {
   const state = { output, stream, contentBlockIndex: -1, thinkingBlockIndex: -1, toolCallsState: [] };
   try {
@@ -1042,8 +570,8 @@ async function run(stream, output, model, context, options, cfg) {
     };
     if (cfg.cleanBody) body = cfg.cleanBody(body);
     // Thinking mode for providers that opt in via a gateway extension field
-    // (e.g. Agnes AI: chat_template_kwargs.enable_thinking). pi signals the
-    // requested level through options.thinkingLevel.
+    // (chat_template_kwargs.enable_thinking). pi signals the requested level
+    // through options.thinkingLevel.
     if (cfg.enableThinking && options?.thinkingLevel && options.thinkingLevel !== "off") {
       body.chat_template_kwargs = { enable_thinking: true };
     }
@@ -1093,108 +621,6 @@ async function run(stream, output, model, context, options, cfg) {
   }
 }
 
-// ── Agnes AI models (shared by international + China providers) ──
-// Chat and verified image-generation models. Image models use the native
-// /v1/images/generations endpoint rather than chat completions. Limits from:
-// https://wiki.agnes-ai.com/en/docs/agnes-25-flash.md (and agnes-20-flash.md)
-const AGNES_MODELS = [
-  {
-    id: "agnes-2.5-flash",
-    name: "Agnes 2.5 Flash",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text", "image"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 512000,
-    maxTokens: 65536,
-  },
-  {
-    id: "agnes-2.0-flash",
-    name: "Agnes 2.0 Flash",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text", "image"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 512000,
-    maxTokens: 65536,
-  },
-  {
-    id: "agnes-2.5-pro",
-    name: "Agnes 2.5 Pro",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text", "image"],
-    cost: { input: 0.45, output: 0.9, cacheRead: 0.0038, cacheWrite: 0 },
-    contextWindow: 1048576,
-    maxTokens: 65536,
-  },
-  {
-    id: "agnes-2.5-pro-alpha",
-    name: "Agnes 2.5 Pro Alpha",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text", "image"],
-    cost: { input: 0.45, output: 0.9, cacheRead: 0.0038, cacheWrite: 0 },
-    contextWindow: 1048576,
-    maxTokens: 65536,
-  },
-  {
-    id: "agnes-image-2.0-flash",
-    name: "Agnes Image 2.0 Flash",
-    api: "openai-completions",
-    input: ["text"],
-    opencodeImageModel: true,
-    opencodeImageProvider: "agnes",
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 4096,
-  },
-  {
-    id: "agnes-image-2.1-flash",
-    name: "Agnes Image 2.1 Flash",
-    api: "openai-completions",
-    input: ["text"],
-    opencodeImageModel: true,
-    opencodeImageProvider: "agnes",
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 4096,
-  },
-  {
-    id: "agnes-video-v2.0",
-    name: "Agnes Video V2.0",
-    api: "openai-completions",
-    input: ["text"],
-    opencodeVideoModel: true,
-    opencodeImageProvider: "agnes",
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 4096,
-  },
-  {
-    id: "agnes-video-2.5",
-    name: "Agnes Video 2.5",
-    api: "openai-completions",
-    input: ["text"],
-    opencodeVideoModel: true,
-    opencodeImageProvider: "agnes",
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 4096,
-  },
-  {
-    id: "agnes-video-2.5-flash",
-    name: "Agnes Video 2.5 Flash",
-    api: "openai-completions",
-    input: ["text"],
-    opencodeVideoModel: true,
-    opencodeImageProvider: "agnes",
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 4096,
-  },
-];
-
 // ── Curated model allowlists ──
 // Models we vouch for: verified free tier + correct metadata (contextWindow,
 // maxTokens, reasoning, input, cost). At load each list is intersected with
@@ -1219,6 +645,8 @@ const ZEN_FREE_MODELS = [
     maxTokens: 131072,
   },
   {
+    // Completion ceiling verified: max_tokens 200000 is rejected with "supports
+    // at most 131072 completion tokens".
     id: "mimo-v2.5-free",
     name: "MiMo-V2.5 Free",
     api: "openai-completions",
@@ -1226,29 +654,37 @@ const ZEN_FREE_MODELS = [
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 200000,
-    maxTokens: 128000,
+    maxTokens: 131072,
   },
   {
-    id: "hy3-free",
-    name: "Hy3 Free",
+    // Replaces hy3-free, which vanished from /v1/models and now answers
+    // "Model hy3-free is not supported". Context window read off the gateway's
+    // own over-budget error ("maximum context length is 262144 tokens").
+    id: "ling-3.0-flash-fin-free",
+    name: "Ling 3.0 Flash Fin Free",
     api: "openai-completions",
     reasoning: true,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 200000,
-    maxTokens: 128000,
+    contextWindow: 262144,
+    maxTokens: 65536,
   },
   {
+    // Context window corrected from 200000: the gateway reports "maximum
+    // context length is 262144 tokens", and max_tokens 262000 is accepted.
     id: "laguna-s-2.1-free",
     name: "Laguna S 2.1 Free",
     api: "openai-completions",
     reasoning: true,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 200000,
-    maxTokens: 128000,
+    contextWindow: 262144,
+    maxTokens: 131072,
   },
   {
+    // Context window confirmed by the gateway ("maximum context length is
+    // 1000000 tokens"); max_tokens 999000 is accepted, so 131072 is a practical
+    // registered ceiling rather than a hard upstream limit.
     id: "nemotron-3-ultra-free",
     name: "Nemotron 3 Ultra Free",
     api: "openai-completions",
@@ -1256,7 +692,7 @@ const ZEN_FREE_MODELS = [
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 1000000,
-    maxTokens: 128000,
+    maxTokens: 131072,
   },
   {
     id: "nemotron-3.5-lightning-free",
@@ -1266,9 +702,11 @@ const ZEN_FREE_MODELS = [
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 1000000,
-    maxTokens: 128000,
+    maxTokens: 131072,
   },
   {
+    // Completion ceiling verified: max_tokens 200000 is rejected with "supports
+    // at most 131072 completion tokens".
     id: "big-pickle",
     name: "Big Pickle",
     api: "openai-completions",
@@ -1276,7 +714,7 @@ const ZEN_FREE_MODELS = [
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 200000,
-    maxTokens: 128000,
+    maxTokens: 131072,
   },
 ];
 const SENSENOVA_MODELS = [
@@ -1321,6 +759,31 @@ const SENSENOVA_MODELS = [
     maxTokens: 131072,
   },
   {
+    // Added after /v1/models showed pricing 0 and a live call returned 200 with
+    // reasoning_content. max_tokens ceiling reported as [1, 393216], but the
+    // catalog's own max_output_length is 65536, so register that.
+    id: "deepseek-v4-pro",
+    name: "DeepSeek V4 Pro (via SenseNova)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 1048576,
+    maxTokens: 65536,
+  },
+  {
+    // Free per /v1/models pricing; verified with a live call (returns
+    // reasoning_content, and max_tokens 999999 is not rejected).
+    id: "kimi-k3",
+    name: "Kimi K3 (via SenseNova)",
+    api: "openai-completions",
+    reasoning: true,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 1048576,
+    maxTokens: 65536,
+  },
+  {
     id: "sensenova-u1-fast",
     name: "SenseNova U1 Fast (image generation)",
     api: "openai-completions",
@@ -1343,334 +806,6 @@ const SENSENOVA_MODELS = [
     maxTokens: 4096,
   },
 ];
-// 免费清单 2026-08-22 经模型广场 biz_info 计价接口逐个核验，并与 /v1/models 在架列表取交集。
-// 变动提示：nex-agi/Nex-N2-Pro 已转付费（输入¥0.00175/输出¥0.007 每K tokens）；
-// Qwen2.5-7B-Instruct 不再免费；glm-4-9b-chat、Qwen2-7B-Instruct、R1-Distill-Qwen-7B、
-// bce 向量/重排序等老牌免费模型均已下线。当前免费聊天模型仅剩以下小模型。
-const SILICONFLOW_MODELS = [
-  {
-    id: "Qwen/Qwen3-8B",
-    name: "Qwen3-8B (免费)",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 65536,
-  },
-  {
-    id: "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B",
-    name: "DeepSeek-R1-0528-Qwen3-8B (免费推理)",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 65536,
-  },
-  {
-    id: "THUDM/GLM-Z1-9B-0414",
-    name: "GLM-Z1-9B (免费推理)",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 32768,
-  },
-  {
-    id: "THUDM/GLM-4-9B-0414",
-    name: "GLM-4-9B-0414 (免费)",
-    api: "openai-completions",
-    reasoning: false,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 32768,
-    maxTokens: 8192,
-  },
-  {
-    id: "Qwen/Qwen3.5-4B",
-    name: "Qwen3.5-4B (免费长上下文)",
-    api: "openai-completions",
-    reasoning: false,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 262144,
-    maxTokens: 65536,
-  },
-  {
-    id: "Tongyi-MAI/Z-Image-Turbo",
-    name: "Z-Image Turbo (SiliconFlow image)",
-    api: "openai-completions",
-    input: ["text"],
-    opencodeImageModel: true,
-    opencodeImageProvider: "siliconflow",
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 4096,
-  },
-  {
-    id: "FunAudioLLM/CosyVoice2-0.5B",
-    name: "CosyVoice2 0.5B (SiliconFlow TTS)",
-    api: "openai-completions",
-    input: ["text"],
-    opencodeAudioModel: true,
-    opencodeAudioProvider: "openai-audio",
-    opencodeVoice: "FunAudioLLM/CosyVoice2-0.5B:alex",
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 4096,
-  },
-  {
-    id: "FunAudioLLM/SenseVoiceSmall",
-    name: "SenseVoiceSmall (SiliconFlow ASR)",
-    api: "openai-completions",
-    input: ["audio"],
-    opencodeTranscriptionModel: true,
-    opencodeAsrProvider: "openai-audio",
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 4096,
-  },
-  {
-    id: "Wan-AI/Wan2.2-T2V-A14B",
-    name: "Wan2.2 T2V A14B (SiliconFlow video)",
-    api: "openai-completions",
-    input: ["text"],
-    opencodeVideoModel: true,
-    opencodeVideoProvider: "siliconflow",
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 4096,
-  },
-];
-const MODELSCOPE_MODELS = [
-  {
-    id: "Qwen/Qwen3-Coder-30B-A3B-Instruct",
-    name: "Qwen3-Coder-30B (via ModelScope)",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 65536,
-  },
-  // DeepSeek-V4-Pro 存在但默认配额不足(429)，需在 ModelScope 控制台开通对应模型额度
-  {
-    id: "deepseek-ai/DeepSeek-V4-Pro",
-    name: "DeepSeek V4 Pro (via ModelScope, 需开通)",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 1048576,
-    maxTokens: 65536,
-  },
-];
-// NVIDIA NIM (build.nvidia.com) — free tier: up to 40 RPM + 10,000 requests/day
-// (site-published limits, daily reset). The RPM cap is account-level and shared
-// across ALL models, so this provider suits low-frequency / fallback use.
-// Curated from the ~100-model catalog after live streaming benchmarks (2026-08).
-// Excluded: deepseek-v4-flash-0731 (read timeout x2), stepfun step-3.7-flash
-// (HTTP 500), kimi-k2.6 / codestral-22b (HTTP 404 not entitled on free accounts),
-// gpt-oss-120b (persistent read-timeouts confirmed by local benchmark + the
-// nvidia-watch CI probe across two networks; Cloudflare carries the same model).
-const NVIDIA_MODELS = [
-  // Benchmark winner: TTFB 0.8s, ~130 tok/s.
-  {
-    id: "openai/gpt-oss-20b",
-    name: "GPT-OSS 20B (via NVIDIA NIM)",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 65536,
-  },
-  // TTFB 0.8s, ~70 tok/s.
-  {
-    id: "minimaxai/minimax-m3",
-    name: "MiniMax M3 (via NVIDIA NIM)",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 65536,
-  },
-  // Thinking model; TTFB 0.8s, ~80 tok/s.
-  {
-    id: "nvidia/nemotron-3-nano-30b-a3b",
-    name: "Nemotron 3 Nano 30B A3B (via NVIDIA NIM)",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 65536,
-  },
-  // Works but slow generation (~5-18 tok/s).
-  {
-    id: "moonshotai/kimi-k3",
-    name: "Kimi K3 (via NVIDIA NIM)",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 65536,
-  },
-  // Thinking model; reasoning consumes most of max_tokens -> slow effective speed.
-  {
-    id: "nvidia/llama-3.3-nemotron-super-49b-v1.5",
-    name: "Llama 3.3 Nemotron Super 49B v1.5 (via NVIDIA NIM)",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 65536,
-  },
-];
-const CLOUDFLARE_MODELS = [
-  {
-    id: "@cf/openai/gpt-oss-120b",
-    name: "GPT-OSS 120B (via Cloudflare)",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 65536,
-  },
-  {
-    id: "@cf/openai/gpt-oss-20b",
-    name: "GPT-OSS 20B (via Cloudflare)",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 65536,
-  },
-  {
-    id: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-    name: "Llama 3.3 70B (via Cloudflare)",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 24000,
-    maxTokens: 8192,
-  },
-  {
-    id: "@cf/qwen/qwen3-30b-a3b-fp8",
-    name: "Qwen3 30B A3B (via Cloudflare)",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 32768,
-    maxTokens: 8192,
-  },
-  {
-    id: "@cf/qwen/qwen2.5-coder-32b-instruct",
-    name: "Qwen2.5 Coder 32B (via Cloudflare)",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 32768,
-    maxTokens: 8192,
-  },
-  {
-    id: "@cf/google/gemma-4-26b-a4b-it",
-    name: "Gemma 4 26B (via Cloudflare)",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 65536,
-  },
-  {
-    id: "@cf/zai-org/glm-4.7-flash",
-    name: "GLM-4.7-Flash (via Cloudflare)",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 65536,
-  },
-  {
-    id: "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
-    name: "DeepSeek R1 Distill Qwen 32B (via Cloudflare)",
-    api: "openai-completions",
-    reasoning: true,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 80000,
-    maxTokens: 65536,
-  },
-  {
-    id: "@cf/black-forest-labs/flux-1-schnell",
-    name: "FLUX.1 Schnell (via Cloudflare image)",
-    api: "openai-completions",
-    input: ["text"],
-    opencodeImageModel: true,
-    opencodeImageProvider: "cloudflare",
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 4096,
-  },
-  {
-    id: "@cf/deepgram/aura-2-en",
-    name: "Deepgram Aura 2 English (via Cloudflare TTS)",
-    api: "openai-completions",
-    input: ["text"],
-    opencodeAudioModel: true,
-    opencodeAudioProvider: "cloudflare",
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 4096,
-  },
-  {
-    id: "@cf/deepgram/aura-2-es",
-    name: "Deepgram Aura 2 Spanish (via Cloudflare TTS)",
-    api: "openai-completions",
-    input: ["text"],
-    opencodeAudioModel: true,
-    opencodeAudioProvider: "cloudflare",
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 4096,
-  },
-  {
-    id: "@cf/openai/whisper",
-    name: "OpenAI Whisper (via Cloudflare ASR)",
-    api: "openai-completions",
-    input: ["audio"],
-    opencodeTranscriptionModel: true,
-    opencodeAsrProvider: "cloudflare",
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 4096,
-  },
-  {
-    id: "@cf/deepgram/nova-3",
-    name: "Deepgram Nova-3 (via Cloudflare ASR)",
-    api: "openai-completions",
-    input: ["audio"],
-    opencodeTranscriptionModel: true,
-    opencodeAsrProvider: "cloudflare",
-    opencodeAsrRawBody: true,
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 4096,
-  },
-];
-
 // ── Live model-list drift detection ──
 // Fetch complete model objects from a provider's /v1/models. The live payload
 // is retained so capability metadata (modalities/features/supports_*) is not
@@ -1946,11 +1081,6 @@ function curatedModels() {
   return {
     zen: ZEN_FREE_MODELS,
     sensenova: SENSENOVA_MODELS,
-    siliconflow: SILICONFLOW_MODELS,
-    modelscope: MODELSCOPE_MODELS,
-    nvidia: NVIDIA_MODELS,
-    cloudflare: CLOUDFLARE_MODELS,
-    agnes: AGNES_MODELS,
   };
 }
 
@@ -1961,18 +1091,13 @@ function initialModels() {
   return {
     zen: cache.zen ?? curated.zen,
     sensenova: cache.sensenova ?? curated.sensenova,
-    siliconflow: cache.siliconflow ?? curated.siliconflow,
-    modelscope: cache.modelscope ?? curated.modelscope,
-    nvidia: cache.nvidia ?? curated.nvidia,
-    cloudflare: curated.cloudflare,
-    agnes: cache.agnes ?? curated.agnes,
   };
 }
 
 // Derive a capabilities block from model metadata. Image-generation models
 // carry explicit opencodeImageModel metadata because their upstream endpoint
-// is not chat completions; verified Agnes/SenseNova models use native
-// image/video generation paths below. Unknown providers remain conservative.
+// is not chat completions; SenseNova's u1 models use the native
+// /images/generations|edits paths. Unknown providers remain conservative.
 function withCapabilities(model) {
   const live = model.opencodeLiveModel ?? {};
   const asArray = (value) => Array.isArray(value) ? value.map(String).map((item) => item.toLowerCase()) : [];
@@ -2063,54 +1188,6 @@ function registerAll(pi, m) {
     streamSimple: streamSenseNova,
     models: m.sensenova,
   });
-  pi.registerProvider("siliconflow", {
-    name: "硅基流动 (SiliconFlow)",
-    apiKey: "public",
-    baseUrl: "https://api.siliconflow.cn/v1",
-    api: "openai-completions",
-    streamSimple: streamSiliconFlow,
-    models: m.siliconflow,
-  });
-  pi.registerProvider("modelscope", {
-    name: "魔塔社区 (ModelScope)",
-    apiKey: "public",
-    baseUrl: "https://api-inference.modelscope.cn/v1",
-    api: "openai-completions",
-    streamSimple: streamModelScope,
-    models: m.modelscope,
-  });
-  pi.registerProvider("nvidia", {
-    name: "NVIDIA NIM",
-    apiKey: "public",
-    baseUrl: "https://integrate.api.nvidia.com/v1",
-    api: "openai-completions",
-    streamSimple: streamNvidia,
-    models: m.nvidia,
-  });
-  pi.registerProvider("cloudflare", {
-    name: "Cloudflare Workers AI (免费额度)",
-    apiKey: "public",
-    baseUrl: "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
-    api: "openai-completions",
-    streamSimple: streamCloudflare,
-    models: m.cloudflare,
-  });
-  pi.registerProvider("agnes", {
-    name: "Agnes AI (国际站)",
-    apiKey: "public",
-    baseUrl: "https://apihub.agnes-ai.com/v1",
-    api: "openai-completions",
-    streamSimple: streamAgnes,
-    models: m.agnes,
-  });
-  pi.registerProvider("agnes-cn", {
-    name: "Agnes AI (中国站)",
-    apiKey: "public",
-    baseUrl: "https://api.agnes-ai.cn/v1",
-    api: "openai-completions",
-    streamSimple: streamAgnesCN,
-    models: m.agnes,
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -2120,12 +1197,6 @@ function registerAll(pi, m) {
 const OPENCODE_PROVIDER_IDS = [
   "opencode-zen",
   "sensenova",
-  "siliconflow",
-  "modelscope",
-  "nvidia",
-  "cloudflare",
-  "agnes",
-  "agnes-cn",
 ];
 
 const OPENCODE_SESSION_USAGE = new Map();
@@ -2270,7 +1341,7 @@ function registerCapabilitiesCommand(pi) {
             `| ${row.provider} | ${row.id} | ${row.reasoning || "—"} | ${row.vision || "—"} | ${row.image || "—"} | ${row.video || "—"} | ${row.audio || "—"} | ${row.tools || "—"} |`,
         ),
         "",
-        "_Capabilities are derived from each curated model's reasoning/input fields; verified Agnes/SenseNova image models use their native generation endpoints._",
+        "_Capabilities are derived from each curated model's reasoning/input fields; SenseNova's u1 image models use their native generation endpoints._",
       ].join("\n");
 
       if (ctx.mode === "tui") {
@@ -2301,23 +1372,14 @@ async function verifyAndUpdateModels(pi) {
     ...OPENCODE_STATIC_HEADERS,
     ...authHeader("OPENCODE_API_KEY", "opencode-zen"),
   };
-  const [zenLive, sensenovaModels, siliconflowModels, modelscopeModels, nvidiaModels, agnesModels] = await Promise.all([
+  const [zenLive, sensenovaModels] = await Promise.all([
     fetchLiveModelIds(`${ZEN_BASE_URL}/models`, zenHeaders, signal),
     filterToLive(SENSENOVA_MODELS, "https://token.sensenova.cn/v1/models", authHeader("SENSENOVA_API_KEY", "sensenova"), signal),
-    filterToLive(SILICONFLOW_MODELS, "https://api.siliconflow.cn/v1/models", authHeader("SILICONFLOW_API_KEY", "siliconflow"), signal),
-    filterToLive(MODELSCOPE_MODELS, "https://api-inference.modelscope.cn/v1/models", authHeader("MODELSCOPE_API_KEY", "modelscope"), signal),
-    filterToLive(NVIDIA_MODELS, "https://integrate.api.nvidia.com/v1/models", authHeader("NVIDIA_NIM_API_KEY", "nvidia"), signal),
-    filterToLive(AGNES_MODELS, "https://apihub.agnes-ai.com/v1/models", authHeader("AGNES_API_KEY", "agnes"), signal),
   ]);
   const zenModels = zenLive ? await verifyZenModels(zenLive, signal) : ZEN_FREE_MODELS;
   const verified = {
     zen: zenModels,
     sensenova: sensenovaModels,
-    siliconflow: siliconflowModels,
-    modelscope: modelscopeModels,
-    nvidia: nvidiaModels,
-    cloudflare: CLOUDFLARE_MODELS,
-    agnes: agnesModels,
   };
   registerAll(pi, verified);
   saveCache(verified);
