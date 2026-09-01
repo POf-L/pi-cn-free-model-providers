@@ -3,7 +3,7 @@
 // (x-opencode-client: cli + ses_/msg_ ULID ids) and converting
 // developer->system roles (upstream only accepts system/user/assistant).
 import { randomBytes } from "node:crypto";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
@@ -632,9 +632,11 @@ async function run(stream, output, model, context, options, cfg) {
 const ZEN_FREE_MODELS = [
   {
     // Responses-API only: /chat/completions answers 500 for this model while
-    // /responses answers 200 with cost "0". Metadata verified against the
-    // gateway: max_output_tokens 131073 is accepted and 1048577 is rejected
-    // upstream, and image parts are accepted without error.
+    // /responses answers 200 with cost "0". Image parts are accepted without
+    // error. On output: the gateway accepts max_output_tokens up to at least
+    // 700000 and rejects 1048576, so 131072 is a deliberate under-claim —
+    // reserving most of the 1M window for output would make long sessions fail
+    // the input+output budget instead.
     id: "muse-spark-1.2-contributor-free",
     name: "Muse Spark 1.2 Free",
     api: "openai-responses",
@@ -646,7 +648,11 @@ const ZEN_FREE_MODELS = [
   },
   {
     // Completion ceiling verified: max_tokens 200000 is rejected with "supports
-    // at most 131072 completion tokens".
+    // at most 131072 completion tokens". contextWindow is inherited and NOT
+    // independently verified — the gateway answers oversized prompts by
+    // compressing them ("use the context-compression plugin to compress your
+    // prompt automatically") instead of naming the context length, so a padded
+    // request cannot measure it. 200000 therefore stays as a safe under-claim.
     id: "mimo-v2.5-free",
     name: "MiMo-V2.5 Free",
     api: "openai-completions",
@@ -706,7 +712,8 @@ const ZEN_FREE_MODELS = [
   },
   {
     // Completion ceiling verified: max_tokens 200000 is rejected with "supports
-    // at most 131072 completion tokens".
+    // at most 131072 completion tokens". contextWindow is inherited and not
+    // independently verified (see mimo-v2.5-free above).
     id: "big-pickle",
     name: "Big Pickle",
     api: "openai-completions",
@@ -835,6 +842,34 @@ async function fetchLiveModelIds(url, headers, signal) {
   return models ? new Set(models.map((model) => model.id ?? model.name).filter(Boolean)) : null;
 }
 
+// When OPENCODE_ZEN_BASE_URL points at a local relay (the region-gate
+// workaround), the relay may still be starting while this pass runs — the
+// catalog fetch then fails, the whole Zen verification is skipped and every Zen
+// call fails until the next session. Retry a loopback target a few times before
+// giving up; a remote gateway is not retried (a 5xx there is real).
+function isLoopbackUrl(url) {
+  try {
+    const { hostname } = new URL(url);
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
+  } catch {
+    return false;
+  }
+}
+
+async function fetchLiveModelIdsResilient(url, headers, signal) {
+  const attempts = isLoopbackUrl(url) ? 5 : 1;
+  for (let i = 0; i < attempts; i++) {
+    const ids = await fetchLiveModelIds(url, headers, signal);
+    if (ids) return ids;
+    if (i === attempts - 1 || signal?.aborted) break;
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 2000);
+      signal?.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+    });
+  }
+  return null;
+}
+
 // pi keeps provider keys in <agentDir>/auth.json (written by `pi auth`), not in
 // the environment. An env-only lookup therefore fell back to `Bearer public`,
 // every authenticated /v1/models call answered 401, fetchLiveModels returned
@@ -842,10 +877,20 @@ async function fetchLiveModelIds(url, headers, signal) {
 // live metadata was never adopted and drift was never detected.
 const AGENT_AUTH_FILE = join(homedir(), ".pi", "agent", "auth.json");
 let agentAuthStore;
+let agentAuthMtime = -1;
 
 function readAgentAuthKey(providerId) {
   if (!providerId) return undefined;
-  if (agentAuthStore === undefined) {
+  // Re-read when the file changes: `pi auth` can store a key mid-session, and a
+  // process-lifetime cache would keep answering with the pre-login state.
+  let mtime = -1;
+  try {
+    mtime = statSync(AGENT_AUTH_FILE).mtimeMs;
+  } catch {
+    mtime = -1;
+  }
+  if (agentAuthStore === undefined || mtime !== agentAuthMtime) {
+    agentAuthMtime = mtime;
     try {
       agentAuthStore = JSON.parse(readFileSync(AGENT_AUTH_FILE, "utf-8"));
     } catch {
@@ -917,47 +962,63 @@ function mergeLiveModel(curated, live) {
 
 // Keep the curated allowlist for safety, but return each retained model with
 // its complete upstream metadata instead of reducing /v1/models to IDs.
+//
+// The three outcomes are deliberately distinct:
+//  • fetch failed (null) → return curated untouched; an outage must not shrink
+//    the catalog.
+//  • fetch succeeded with overlap → return the merged intersection.
+//  • fetch succeeded with ZERO overlap → return the empty list. Falling back to
+//    curated here (the old behaviour) meant that if a provider retired every
+//    curated id at once, the extension kept registering models that no longer
+//    exist, and every call would fail at runtime with no hint why.
 async function filterToLive(curated, url, headers, signal) {
   const liveModels = await fetchLiveModels(url, headers, signal);
   if (!liveModels) return curated;
   const byId = new Map(liveModels.map((model) => [model.id ?? model.name, model]));
-  const kept = curated
+  return curated
     .filter((model) => byId.has(model.id))
     .map((model) => mergeLiveModel(model, byId.get(model.id)));
-  return kept.length ? kept : curated;
 }
 
 // ── Zen free-model auto-discovery ──
 // /v1/models exposes no pricing and paid models keep "-free" ids, so freeness
-// is verified by probing: a tiny chat completion per unknown model. Free
-// models accept the anonymous "public" key (HTTP 200) while paid ones reject
-// it during auth (401/402/403) before any tokens are billed. When a real
-// OPENCODE_API_KEY is set, the response's `cost` field must be zero instead —
-// paid models then succeed but report non-zero cost.
+// is verified by probing: a tiny chat completion per model.
+//
+// Probing always uses the anonymous "public" key, EVEN when a real
+// OPENCODE_API_KEY is configured: free models answer 200 while paid ones are
+// rejected during auth (401/402/403) before a single token is billed. The
+// key-based variant (accept the answer, then read `cost`) does bill the paid
+// models it probes — one output token each across ~50 paid ids per startup —
+// so it is only used as a fallback when the anonymous attempt was inconclusive
+// (e.g. the shared free quota answered 429).
+//
 // Returns { status, api } where status is "free" (verified), "paid" (verified
-// not free), or "unknown" (network/shape errors — callers must keep the model
-// rather than drop it, so a transient outage never wipes the list). `api` is
-// the endpoint the model actually answered on.
+// not free), or "unknown" (network/shape errors — the caller keeps curated
+// models on unknown, so a transient outage never wipes the list). `api` is the
+// endpoint the model actually answered on.
 //
 // Some Zen models are Responses-API only: muse-spark-1.2-contributor-free
 // answers 500 on /chat/completions and 200 with cost "0" on /responses. Probing
 // only chat completions classified those as "unknown" forever, so they could
 // never enter the list even though they are free and usable.
-async function probeFreeStatus(modelId, signal) {
-  const apiKey = process.env.OPENCODE_API_KEY;
-  const headers = () => ({
+function zenRequestHeaders(apiKey = "public") {
+  return {
     "Content-Type": "application/json",
     ...OPENCODE_STATIC_HEADERS,
     "x-opencode-session": SESSION_ID,
     "x-opencode-request": generateOpenCodeId("msg_"),
-    Authorization: `Bearer ${apiKey ?? "public"}`,
-  });
-  const attempt = async (path, body) => {
+    Authorization: `Bearer ${apiKey}`,
+  };
+}
+
+async function probeFreeStatus(modelId, signal) {
+  const apiKey = process.env.OPENCODE_API_KEY;
+  const attempt = async (path, body, key) => {
     let res;
     try {
       res = await fetch(`${ZEN_BASE_URL}${path}`, {
         method: "POST",
-        headers: headers(),
+        headers: zenRequestHeaders(key),
         body: JSON.stringify(body),
         signal: boundedSignal(20000, signal),
       });
@@ -965,28 +1026,54 @@ async function probeFreeStatus(modelId, signal) {
       return "unknown";
     }
     if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      // A model the gateway itself says it does not have is gone, whatever the
+      // status code happens to be (hy3-free answered 401 "Model hy3-free is not
+      // supported", deepseek-v4-flash-free answers 400 "Model is unavailable.").
+      // The wording must be about the MODEL: laguna-s-2.1-free's transient 503
+      // reads "Endpoint is unavailable." and must stay "unknown".
+      if (res.status === 404 || /model\b[^.]{0,64}(is unavailable|not supported|not found|does not exist)/i.test(text)) {
+        return "gone";
+      }
       // Auth/billing rejection = verified not free. Anything else (5xx, rate
       // limit) says nothing about pricing — treat as unknown.
       return [401, 402, 403].includes(res.status) ? "paid" : "unknown";
     }
     let json;
     try { json = await res.json(); } catch { return "unknown"; }
-    if (apiKey) return Number(json?.cost ?? 0) === 0 ? "free" : "paid";
-    return "free";
+    // Anonymous 200 means the free tier served it. With a real key even paid
+    // models answer, so freeness has to come from the reported cost.
+    if (key === "public") return "free";
+    return Number(json?.cost ?? 0) === 0 ? "free" : "paid";
   };
 
-  const chat = await attempt("/chat/completions", {
-    model: modelId,
-    messages: [{ role: "user", content: "hi" }],
-    max_tokens: 1,
-  });
-  if (chat !== "unknown") return { status: chat, api: "openai-completions" };
+  const chatBody = { model: modelId, messages: [{ role: "user", content: "hi" }], max_tokens: 1 };
+  const responsesBody = { model: modelId, input: "hi" };
+  const settled = (status) => status === "free" || status === "paid";
 
-  // Only retry on the other transport when chat completions was inconclusive:
-  // a verified "paid" or "free" answer already settles it, and a second call
-  // would bill a second token.
-  const responses = await attempt("/responses", { model: modelId, input: "hi" });
-  if (responses !== "unknown") return { status: responses, api: "openai-responses" };
+  const chat = await attempt("/chat/completions", chatBody, "public");
+  if (settled(chat)) return { status: chat, api: "openai-completions" };
+
+  // Only retry on the other transport when chat completions did not settle it:
+  // a verified "paid" or "free" answer is final, and a second call would spend
+  // another request against the shared free quota. "gone" is not final here —
+  // Responses-API-only models can reject the chat transport outright.
+  const responses = await attempt("/responses", responsesBody, "public");
+  if (settled(responses)) return { status: responses, api: "openai-responses" };
+
+  // Anonymous probing was inconclusive on both transports. A configured key can
+  // still settle it (at the cost of one output token on paid models).
+  if (apiKey) {
+    const keyedChat = await attempt("/chat/completions", chatBody, apiKey);
+    if (settled(keyedChat)) return { status: keyedChat, api: "openai-completions" };
+    const keyedResponses = await attempt("/responses", responsesBody, apiKey);
+    if (settled(keyedResponses)) return { status: keyedResponses, api: "openai-responses" };
+    if (keyedChat === "gone" && keyedResponses === "gone") return { status: "gone", api: "openai-completions" };
+    return { status: "unknown", api: "openai-completions" };
+  }
+  // Only call it gone when BOTH transports said so: one "gone" plus one
+  // inconclusive answer could still be a transport quirk plus an outage.
+  if (chat === "gone" && responses === "gone") return { status: "gone", api: "openai-completions" };
   return { status: "unknown", api: "openai-completions" };
 }
 // Run async fn over items with bounded concurrency.
@@ -1002,7 +1089,9 @@ async function mapLimit(items, limit, fn) {
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
   return results;
 }
-function makeDiscoveredModel(id, api = "openai-completions") {
+function makeDiscoveredModel(id, api = "openai-completions", limits = {}) {
+  const contextWindow = limits.contextWindow ?? 131072;
+  const maxTokens = Math.min(limits.maxTokens ?? 65536, contextWindow);
   return {
     id,
     name: id,
@@ -1010,31 +1099,89 @@ function makeDiscoveredModel(id, api = "openai-completions") {
     reasoning: true,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 131072,
-    maxTokens: 65536,
+    contextWindow,
+    maxTokens,
   };
 }
-// Verify the whole live Zen list by probing every id (curated entries use
-// their hand-verified metadata, unknown ones get conservative defaults). This
-// catches models that switched from free to paid while staying listed — they
-// are dropped exactly like renamed/removed ones. If nothing verifies free
-// (e.g. probes all failed), fall back to the curated ∩ live intersection so a
-// gateway outage never empties the provider.
+
+// Zen's /v1/models carries no limits at all (only id/object/created/owned_by),
+// so an auto-discovered model used to be registered with flat 128K/64K guesses —
+// wrong in both directions (nemotron-* really take 1M of context, big-pickle
+// really accepts 131072 completion tokens). The gateway does name its real
+// ceilings when a request exceeds them, and rejects before generating anything,
+// so one deliberately over-budget request buys accurate metadata for free.
+// Both observed shapes are parsed:
+//   "max_tokens is too large: N. This model supports at most 131072 completion tokens…"
+//   "This endpoint's maximum context length is 262144 tokens. However, you requested…"
+function parseZenLimits(text) {
+  const limits = {};
+  const output = /at most (\d+) (?:completion|output) tokens/i.exec(text);
+  if (output) limits.maxTokens = Number(output[1]);
+  const context = /maximum context length is (\d+) tokens/i.exec(text);
+  if (context) limits.contextWindow = Number(context[1]);
+  return limits;
+}
+
+async function discoverZenLimits(modelId, api, signal) {
+  const path = api === "openai-responses" ? "/responses" : "/chat/completions";
+  const body = api === "openai-responses"
+    ? { model: modelId, input: "hi", max_output_tokens: 99999999 }
+    : { model: modelId, messages: [{ role: "user", content: "hi" }], max_tokens: 99999999 };
+  try {
+    const res = await fetch(`${ZEN_BASE_URL}${path}`, {
+      method: "POST",
+      headers: zenRequestHeaders(),
+      body: JSON.stringify(body),
+      signal: boundedSignal(20000, signal),
+    });
+    // A 200 would mean the ceiling is above our absurd ask; nothing to learn,
+    // and the response is a real (free) completion, so just ignore it.
+    if (res.ok) return {};
+    const limits = parseZenLimits(await res.text());
+    // Never let a parsed output ceiling exceed the context window.
+    if (limits.maxTokens && limits.contextWindow) {
+      limits.maxTokens = Math.min(limits.maxTokens, limits.contextWindow);
+    }
+    return limits;
+  } catch {
+    return {};
+  }
+}
+// Verify the whole live Zen list by probing every id. Curated entries keep their
+// hand-verified metadata; unknown ones get their limits discovered from the
+// gateway. This catches models that switched from free to paid while staying
+// listed — they are dropped exactly like renamed/removed ones.
+//
+// A probe that came back "unknown" (5xx, rate limit, timeout) says nothing about
+// pricing, so a curated model is KEPT on unknown: a single upstream hiccup used
+// to silently remove a vouched model from the session's catalog (observed with
+// laguna-s-2.1-free answering 503 "Endpoint is unavailable."). Non-curated
+// unknowns are still skipped — nothing is known about them, so registering them
+// would be a guess.
 async function verifyZenModels(liveIds, signal) {
   const known = new Map(ZEN_FREE_MODELS.map((m) => [m.id, m]));
   const ids = [...liveIds];
-  const probes = await mapLimit(ids, 8, (id) => probeFreeStatus(id, signal));
+  const probes = await mapLimit(ids, 12, (id) => probeFreeStatus(id, signal));
   const verified = [];
+  const discovered = [];
   for (let i = 0; i < ids.length; i++) {
     const probe = probes[i];
-    if (probe?.status !== "free") continue;
     const curated = known.get(ids[i]);
-    // A model that only answers on /responses must be registered with that
-    // api, otherwise the chat-completions transport is used at runtime and
-    // every request fails.
-    if (curated) verified.push(probe.api === curated.api ? curated : { ...curated, api: probe.api });
-    else verified.push(makeDiscoveredModel(ids[i], probe.api));
+    if (probe?.status === "paid" || probe?.status === "gone") continue;
+    if (probe?.status !== "free" && !curated) continue;
+    if (curated) {
+      // A model that only answers on /responses must be registered with that
+      // api, otherwise the chat-completions transport is used at runtime and
+      // every request fails. An unknown probe carries no usable api signal, so
+      // the curated value stands.
+      const api = probe?.status === "free" ? probe.api : curated.api;
+      verified.push(api === curated.api ? curated : { ...curated, api });
+    } else {
+      discovered.push({ id: ids[i], api: probe.api });
+    }
   }
+  const limits = await mapLimit(discovered, 6, (m) => discoverZenLimits(m.id, m.api, signal));
+  discovered.forEach((m, index) => verified.push(makeDiscoveredModel(m.id, m.api, limits[index] ?? {})));
   if (verified.length) return verified;
   const kept = ZEN_FREE_MODELS.filter((m) => liveIds.has(m.id));
   return kept.length ? kept : ZEN_FREE_MODELS;
@@ -1046,6 +1193,15 @@ async function verifyZenModels(liveIds, signal) {
 
 const OPENCODE_CACHE_FILE = join(homedir(), ".pi", "cache", "opencode-native-models.json");
 const OPENCODE_CACHE_TTL = 24 * 60 * 60 * 1000;
+// Re-verifying costs one probe request per live Zen model (~60) against a free
+// tier that is shared between all anonymous users, so doing it on every pi
+// launch burns quota that the user would rather spend on actual completions.
+// A fresh cache is trusted for this long before another sweep is scheduled.
+const OPENCODE_VERIFY_TTL = 6 * 60 * 60 * 1000;
+
+function cacheIsFresh(cache, ttl) {
+  return !!cache && typeof cache.timestamp === "number" && Date.now() - cache.timestamp < ttl;
+}
 
 function loadCache() {
   try {
@@ -1364,16 +1520,18 @@ function registerCapabilitiesCommand(pi) {
 // registered (curated or cached) models untouched, so the user is never blocked.
 async function verifyAndUpdateModels(pi) {
   // Overall safety net so a pathological network can never strand this task.
-  // This must be threaded into every request: with 60+ Zen models probed 8 at a
-  // time at 20s each, per-request timeouts alone allowed the pass to run for
-  // minutes.
-  const signal = AbortSignal.timeout(45000);
+  // This must be threaded into every request. The budget has to cover the whole
+  // Zen sweep: ~60 ids probed 12 at a time (20s each) plus a limit-discovery
+  // request per newly discovered model. 45s was tight enough that a slow round
+  // could be cut off mid-sweep, which used to shrink the catalog; the pass runs
+  // in the background, so a generous ceiling costs nothing.
+  const signal = AbortSignal.timeout(180000);
   const zenHeaders = {
     ...OPENCODE_STATIC_HEADERS,
     ...authHeader("OPENCODE_API_KEY", "opencode-zen"),
   };
   const [zenLive, sensenovaModels] = await Promise.all([
-    fetchLiveModelIds(`${ZEN_BASE_URL}/models`, zenHeaders, signal),
+    fetchLiveModelIdsResilient(`${ZEN_BASE_URL}/models`, zenHeaders, signal),
     filterToLive(SENSENOVA_MODELS, "https://token.sensenova.cn/v1/models", authHeader("SENSENOVA_API_KEY", "sensenova"), signal),
   ]);
   const zenModels = zenLive ? await verifyZenModels(zenLive, signal) : ZEN_FREE_MODELS;
@@ -1391,12 +1549,30 @@ export default function (pi) {
   // so Pi startup is never blocked on network model discovery. The live
   // drift/probe pass runs in the background and hot-swaps the catalog without a
   // /reload.
+  const cache = loadCache();
   registerAll(pi, initialModels());
   registerCapabilitiesCommand(pi);
   registerPricesCommand(pi);
   installUsageTracker(pi);
   registerUsageCommand(pi);
-  setTimeout(() => {
-    verifyAndUpdateModels(pi).catch(() => {});
-  }, 100);
+  // A recent sweep already answered the same questions, and re-probing every
+  // Zen model eats the shared anonymous quota. `/model-refresh` forces one.
+  if (!cacheIsFresh(cache, OPENCODE_VERIFY_TTL)) {
+    setTimeout(() => {
+      verifyAndUpdateModels(pi).catch(() => {});
+    }, 100);
+  }
+  pi.registerCommand("model-refresh", {
+    description: "Re-run the live model verification pass now (ignores the 6h cache)",
+    handler: async (_args, ctx) => {
+      const before = Date.now();
+      await verifyAndUpdateModels(pi).catch((error) => {
+        showModelMarkdown(pi, ctx, "model-refresh", `Model refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+        throw error;
+      });
+      const seconds = ((Date.now() - before) / 1000).toFixed(1);
+      showModelMarkdown(pi, ctx, "model-refresh", `Model catalog re-verified in ${seconds}s.`);
+    },
+  });
+  pi.registerEntryRenderer("model-refresh", (entry) => new Markdown(entry.data.markdown, 1, 0, getMarkdownTheme()));
 }

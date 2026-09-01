@@ -295,15 +295,25 @@ opencode 原生方式不经过 `cleanBody`，但实测标准对话/工具调用�
 10. **package.json 的 UTF-8 BOM（1.0.2 已修复）**：1.0.0/1.0.1 发布到 npm 的 `package.json` 首行带 UTF-8 BOM。pi 的 `readPiManifest` 用裸 `JSON.parse` 解析该文件，BOM 会令解析抛错并被静默忽略，导致整个扩展不加载（`/model` 里看不到 `opencode-zen`/`sensenova` 等任何 provider）。1.0.2 起已去掉 BOM；若 `pi install` 后看不到 provider，请 `pi update --extensions` 确认装的是 1.0.2+。pi 侧的健壮性问题已提交：[earendil-works/pi#8310](https://github.com/earendil-works/pi/issues/8310)。
 11. **无需手动配置 auth.json（1.0.4 起）**：旧版要求 `~/.pi/agent/auth.json` 中为每个 provider 添加 `{ "type": "api_key", "key": "public" }` 条目，否则 pi 找不到 key 会直接跳过扩展（报 `No API key found for <provider>`）。1.0.4 起每个 provider 自注册 `apiKey: "public"`（匿名占位），pi 视其为已配置 key，装完即可见可用；要使用账号 key 直接用环境变量即可。重装插件后无需再改 auth.json。
 
-12. **免费清单自动去漂移（1.0.6 起）**：启动后会在**后台**拉取各自 provider 的 `/v1/models` 实时列表，与内置白名单做交集，**自动剔除已从免费档下架/改名的模型**（如某模型被移出免费档，下次启动即不再出现，无需等发版）。设计上**只删不增**：因为各 `/v1/models` 端点不返回定价，且付费模型会保留 `-free` 后缀（如已被移出免费档的 `deepseek-v4-flash-free` 仍列在 Zen 端点里），自动新增会把付费模型误当免费暴露。新增免费模型仍需在 `pi-cn-free-model-providers-ext.mjs` 的对应白名单里人工添加（并补好 metadata）。拉取失败/超时（8s）时静默回退到内置白名单，注册永不中断；第三方供应商需设置对应 API key 环境变量才会做实时校验，否则直接用内置列表。
+12. **免费清单自动去漂移**：启动后会在**后台**拉取各 provider 的 `/v1/models` 实时列表，与内置白名单做交集，**自动剔除已下架/改名的模型**。三种结果严格区分：拉取失败 → 保留内置白名单（网络故障绝不缩表）；拉取成功且有交集 → 用实时元数据（`context_length` / `max_output_length` / `input_modalities`）覆盖白名单里的静态数字；拉取成功但**交集为空** → 返回空列表。最后这种以前会退回白名单，结果是上游把所有模型下架后插件还在注册不存在的模型、每次调用都失败且看不出原因。
 
-13. **Zen 免费模型自动发现 + 免费状态复核（1.0.7 起）**：Zen 供应商在启动后会在**后台**对实时列表中的**全部模型逐个发探测请求**（`max_tokens: 1` 的小请求，8 路并发）：匿名 `public` key 能返回 200 即判定免费（付费模型在鉴权阶段就被 401 拒绝，不计费）；若设置了真实 `OPENCODE_API_KEY`，则改用响应中的 `cost` 字段是否为 0 判定。因此：① 不在白名单的新免费模型**无需等插件发版即可直接使用**（自动注册，保守 metadata：上下文 128K / 输出 64K，名称即模型 ID）；② **白名单模型若被官方转为付费，即使仍在 `/v1/models` 里也会被自动剔除**，避免匿名下报错、配了真实 key 时被误扣费。探测结果分三档：`free`（保留/新增）、`paid`（剔除）、`unknown`（网络故障等，一律保留原状，瞬时故障不会清空列表；全部 unknown 时回退到白名单 ∩ 实时列表）。白名单条目始终优先（元数据更精确），想要补全显示名/上下文窗口可在白名单中加正式条目。
+13. **Zen 免费模型自动发现 + 免费状态复核**：Zen 在启动后于**后台**对实时列表中的每个模型发一个 `max_tokens: 1` 的探测请求（12 路并发）。探测**始终先用匿名 `public` key**——免费模型返回 200，付费模型在鉴权阶段就被 401/402/403 拒绝，**不产生任何计费**；只有匿名两条传输都无结论（例如共享额度 429）时，才在配了真实 `OPENCODE_API_KEY` 的情况下改用「看响应 `cost` 是否为 0」的判定（这种判定会让付费模型各产生 1 个 output token 的费用）。结果分四档：
+    - `free` — 保留或新增。不在白名单的新免费模型无需等发版即可使用；它的上下文/输出上限**从网关自报的超额报错里解析**（`This model supports at most N completion tokens` / `This endpoint's maximum context length is N tokens`），不再是固定的 128K/64K 猜测。
+    - `paid` — 剔除（避免匿名下报错、配了真实 key 时被误扣费）。
+    - `gone` — 剔除。网关自己说「没这个模型」（`Model xxx is not supported`、`Model is unavailable.`，或 404），且两条传输都这么说才算。注意与瞬时故障区分：`Endpoint is unavailable.`（503）不算。
+    - `unknown` — 网络故障、5xx、限流。**白名单模型一律保留**（曾出现 `laguna-s-2.1-free` 偶发 503 就让它整个会话从 `/model` 里消失）；非白名单的 unknown 不新增，因为对它一无所知。
+    全部无结论时回退到「白名单 ∩ 实时列表」。白名单条目始终优先（元数据经手工核验，更精确）。
+
+14. **探测有 6 小时缓存**：每次校验要对约 60 个 Zen 模型各发一个请求，而免费额度是全体匿名用户共享的，每次启动 pi 都重跑等于把额度花在探测上。因此磁盘缓存在 6 小时内视为新鲜，直接跳过后台校验；需要立刻重跑用 `/model-refresh`。
+
+15. **本地 relay 冷启动重试**：若 `OPENCODE_ZEN_BASE_URL` 指向本机 relay（绕区域门的方案），relay 可能还在启动中，此时目录拉取会失败并导致整轮 Zen 校验被跳过。对 loopback 地址会重试 5 次（间隔 2s）；远端网关不重试（那里的 5xx 是真故障）。
 
 ## 命令
 
-- `/model-capabilities [image|video|audio|vision|reasoning|tools]` — 列出本扩展注册的全部 provider 下每个模型的能力；已验证的图像/视频/音频模型也会注册并使用原生 endpoint。
+- `/model-capabilities [image|video|audio|vision|reasoning|tools]` — 列出本扩展注册的全部 provider 下每个模型的能力；SenseNova 的 u1 图像模型走原生 endpoint。
 - `/model-prices [provider]` — 查询已注册模型的 catalog 定价（USD/1M tokens、上下文窗口）。零值表示 curated catalog 标记为免费；没有真实价格时显示 `—`。
 - `/model-usage` — 查询当前 Pi 进程累计的 token/cost 使用量。它是 session usage，不是各 provider 的后台账单；各 provider 没有统一 usage API。
+- `/model-refresh` — 立刻重跑实时校验（忽略 6 小时缓存），完成后报告耗时。
 
 ## ModLens 视觉引擎切换
 
