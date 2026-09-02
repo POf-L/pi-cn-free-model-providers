@@ -772,11 +772,16 @@ const ZEN_FREE_MODELS = [
     // Completion ceiling verified: max_tokens 200000 is rejected with "supports
     // at most 131072 completion tokens". contextWindow is inherited and not
     // independently verified (see mimo-v2.5-free above).
+    // Static fallback only: the per-model effort map and token ceilings are
+    // re-probed from the gateway on each verify pass (see verifyZenModels), so
+    // this entry just has to be right enough until the first pass completes.
+    // Current upstream reality (probed): max/minimal/xhigh are refused, only
+    // none|low|medium|high are stable — hence EFFORT_LEVELS_BASIC, not ALL.
     id: "big-pickle",
     name: "Big Pickle",
     api: "openai-completions",
     reasoning: true,
-    thinkingLevelMap: EFFORT_LEVELS_ALL,
+    thinkingLevelMap: EFFORT_LEVELS_BASIC,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 200000,
@@ -1141,6 +1146,111 @@ async function probeFreeStatus(modelId, signal) {
   if (chat === "gone" && responses === "gone") return { status: "gone", api: "openai-completions" };
   return { status: "unknown", api: "openai-completions" };
 }
+
+// ── reasoning_effort enumeration probing (replaces hardcoded stale maps) ──
+// The gateway never publishes the accepted reasoning_effort values: /v1/models
+// carries only id/object/created/owned_by. Each curated thinkingLevelMap was
+// written from a single manual measurement and goes stale the moment the
+// upstream rotates — big-pickle's static map still sends "max" while the
+// gateway now rejects it 100% of the time. So accepted values are re-probed
+// from the gateway on every verify pass, exactly like the token ceilings.
+//
+// Upstream rejection is intermittent: a refused value surfaces as either an
+// HTTP 500 or a streamed `[400] Invalid request parameters` (never a field name
+// or enum), and - unlike mimo-v2.5-free's old behaviour - a value can pass
+// sometimes and fail other times. A value is therefore kept only if EVERY
+// attempt succeeds: one failure marks the level unusable, because re-serving a
+// level that fails 1-in-4 is worse than hiding it from /think. Attempts use
+// max_tokens 1, so a supported level costs a single output token.
+const EFFORT_VALUES = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+// "none" is the model's default level, so if IT fails the upstream is plainly
+// flaking (throttling/instability) and the whole probe is untrustworthy — the
+// caller keeps the curated map instead. This guards against garbage like a
+// model that "only accepts xhigh and max": measured once when the shared free
+// tier was mid-throttle.
+const EFFORT_PROBE_ATTEMPTS = 2;
+
+async function probeEffortValue(modelId, effort, signal) {
+  const body = {
+    model: modelId,
+    messages: [{ role: "user", content: "hi" }],
+    max_tokens: 1,
+    stream: true,
+    ...(effort ? { reasoning_effort: effort } : {}),
+  };
+  let res;
+  try {
+    res = await fetch(`${ZEN_BASE_URL}/chat/completions`, {
+      method: "POST",
+      headers: zenRequestHeaders(),
+      body: JSON.stringify(body),
+      signal: boundedSignal(20000, signal),
+    });
+  } catch {
+    return false; // network/abort: conservatively treated as unsupported
+  }
+  if (!res.ok) return false; // HTTP 400/500 => refused
+  // A refusal can still hide inside an otherwise-200 stream, so drain it and
+  // watch for the SSE `error` event (the `[400] Invalid request parameters`).
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    while (true) {
+      const lineEnd = buffer.indexOf("\n");
+      if (lineEnd === -1) break;
+      const line = buffer.slice(0, lineEnd).trim();
+      buffer = buffer.slice(lineEnd + 1);
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (data === "[DONE]") return true;
+      try {
+        if (JSON.parse(data).error) return false;
+      } catch {}
+    }
+  }
+  return true;
+}
+
+// Returns a full thinkingLevelMap ({ off: "none", minimal|low|…|max } with
+// null for refused levels) or null when the probe could not complete — an
+// incomplete probe must not masquerade as "no levels supported", so the caller
+// keeps the curated map in that case.
+// staticMap is the curated map, used as a CEILING: a level the curated entry
+// marks null (empirically refused, e.g. big-pickle's max) can never be
+// re-enabled by a probe — upstream flakiness occasionally makes a refused
+// level answer 200 for a short window (measured: big-pickle's max passed two
+// 1-token probes at 11:49, then answered HTTP 500 nine times in a row at
+// 12:05), and letting that window leak into the cache would re-arm the exact
+// failure this whole mechanism exists to prevent. Levels the curated map does
+// not null stay fully probe-driven.
+async function probeEffortMap(modelId, signal, staticMap) {
+  const map = {};
+  for (const value of EFFORT_VALUES) {
+    if (signal?.aborted) return null;
+    // Static ceiling: never re-enable a level the curated entry refuses.
+    if (staticMap?.[value] === null) {
+      map[value] = null;
+      continue;
+    }
+    let ok = 0;
+    for (let attempt = 0; attempt < EFFORT_PROBE_ATTEMPTS; attempt++) {
+      if (signal?.aborted) return null;
+      if (await probeEffortValue(modelId, value, signal)) ok++;
+    }
+    map[value] = ok === EFFORT_PROBE_ATTEMPTS ? value : null;
+  }
+  // Nearly everything refused in one pass almost certainly means a transient
+  // network/stall issue rather than a model that really accepts one value out
+  // of seven — refuse to replace the curated map with that artifact. Likewise
+  // a failed "none" (the default level) marks the whole probe unreliable.
+  const refused = EFFORT_VALUES.filter((value) => map[value] === null).length;
+  if (refused >= EFFORT_VALUES.length - 1 || map.none === null) return null;
+  return { off: "none", ...map };
+}
 // Run async fn over items with bounded concurrency.
 async function mapLimit(items, limit, fn) {
   const results = new Array(items.length);
@@ -1226,7 +1336,21 @@ async function discoverZenLimits(modelId, api, signal) {
 async function verifyZenModels(liveIds, signal) {
   const known = new Map(ZEN_FREE_MODELS.map((m) => [m.id, m]));
   const ids = [...liveIds];
-  const probes = await mapLimit(ids, 12, (id) => probeFreeStatus(id, signal));
+  // Curated chat models are the ones users actually pick, so their effort maps
+  // and token ceilings are probed IN PARALLEL with the freeness sweep instead
+  // of after it: the sweep is the slow part (dozens of ids, 12 at a time), and
+  // waiting for it spent the whole time budget before a single effort value was
+  // measured (observed: 180s budget exhausted during the sweep, effort probing
+  // aborted mid-way, cache never updated). Responses-only models keep their
+  // (already correct) curated map — /chat/completions cannot probe them.
+  const curatedChat = ZEN_FREE_MODELS.filter((m) => m.api === "openai-completions");
+  const [probes, effortMaps, ceilings] = await Promise.all([
+    mapLimit(ids, 12, (id) => probeFreeStatus(id, signal)),
+    mapLimit(curatedChat, 4, (m) => probeEffortMap(m.id, signal, m.thinkingLevelMap)),
+    mapLimit(curatedChat, 4, (m) => discoverZenLimits(m.id, "openai-completions", signal)),
+  ]);
+  const effortByModel = new Map(curatedChat.map((m, index) => [m.id, effortMaps[index]]));
+  const ceilingByModel = new Map(curatedChat.map((m, index) => [m.id, ceilings[index]]));
   const verified = [];
   const discovered = [];
   for (let i = 0; i < ids.length; i++) {
@@ -1240,12 +1364,25 @@ async function verifyZenModels(liveIds, signal) {
       // every request fails. An unknown probe carries no usable api signal, so
       // the curated value stands.
       const api = probe?.status === "free" ? probe.api : curated.api;
-      verified.push(api === curated.api ? curated : { ...curated, api });
+      let next = api === curated.api ? curated : { ...curated, api };
+      if (api === "openai-completions") {
+        next = { ...next };
+        const effort = effortByModel.get(curated.id);
+        // A null map means the probe could not finish; keep the curated fallback.
+        if (effort) next.thinkingLevelMap = effort;
+        const c = ceilingByModel.get(curated.id);
+        if (c?.contextWindow) next.contextWindow = c.contextWindow;
+        if (c?.maxTokens) next.maxTokens = c.maxTokens;
+      }
+      verified.push(next);
     } else {
       discovered.push({ id: ids[i], api: probe.api });
     }
   }
   const limits = await mapLimit(discovered, 6, (m) => discoverZenLimits(m.id, m.api, signal));
+  // Discovered models are left with no effort map (no reasoning_effort sent) to
+  // keep the anonymous shared quota for the models users actually pick; only
+  // their token limits are discovered.
   discovered.forEach((m, index) => verified.push(makeDiscoveredModel(m.id, m.api, limits[index] ?? {})));
   if (verified.length) return verified;
   const kept = ZEN_FREE_MODELS.filter((m) => liveIds.has(m.id));
@@ -1258,6 +1395,10 @@ async function verifyZenModels(liveIds, signal) {
 
 const OPENCODE_CACHE_FILE = join(homedir(), ".pi", "cache", "opencode-native-models.json");
 const OPENCODE_CACHE_TTL = 24 * 60 * 60 * 1000;
+// Bump when the cache schema or the meaning of a cached field changes (e.g. when
+// effort maps started being probed at runtime), so a stale on-disk cache with an
+// outdated thinkingLevelMap is dropped instead of overriding the new behaviour.
+const OPENCODE_CACHE_VERSION = 2;
 // Re-verifying costs one probe request per live Zen model (~60) against a free
 // tier that is shared between all anonymous users, so doing it on every pi
 // launch burns quota that the user would rather spend on actual completions.
@@ -1272,6 +1413,7 @@ function loadCache() {
   try {
     const data = JSON.parse(readFileSync(OPENCODE_CACHE_FILE, "utf-8"));
     if (!data || typeof data.timestamp !== "number") return null;
+    if (data.version !== OPENCODE_CACHE_VERSION) return null; // stale schema
     if (Date.now() - data.timestamp > OPENCODE_CACHE_TTL) return null;
     return data;
   } catch {
@@ -1292,7 +1434,7 @@ function saveCache(models) {
         ? list.map(({ opencodeLiveModel: _live, capabilities: _caps, ...rest }) => rest)
         : list;
     }
-    writeFileSync(OPENCODE_CACHE_FILE, JSON.stringify({ timestamp: Date.now(), ...slim }));
+    writeFileSync(OPENCODE_CACHE_FILE, JSON.stringify({ timestamp: Date.now(), version: OPENCODE_CACHE_VERSION, ...slim }));
   } catch {
     // best-effort; the cache is an optimization, never required
   }
@@ -1604,7 +1746,7 @@ async function verifyAndUpdateModels(pi) {
   // request per newly discovered model. 45s was tight enough that a slow round
   // could be cut off mid-sweep, which used to shrink the catalog; the pass runs
   // in the background, so a generous ceiling costs nothing.
-  const signal = AbortSignal.timeout(180000);
+  const signal = AbortSignal.timeout(300000);
   const zenHeaders = {
     ...OPENCODE_STATIC_HEADERS,
     ...authHeader("OPENCODE_API_KEY", "opencode-zen"),
@@ -1619,7 +1761,10 @@ async function verifyAndUpdateModels(pi) {
     sensenova: sensenovaModels,
   };
   registerAll(pi, verified);
-  saveCache(verified);
+  // A timed-out pass leaves the effort maps/limits half-probed; writing that
+  // would overwrite a good cache with conservative fallback values. The already
+  // registered models are still useful for this session, so only skip the write.
+  if (!signal.aborted) saveCache(verified);
 }
 
 // ── Extension entry ──

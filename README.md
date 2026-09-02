@@ -135,16 +135,20 @@ pi --model opencode-zen/big-pickle
 | 模型 ID | 说明 | 上下文 | 输出上限 | 思考档位 |
 |---|---|---|---|---|
 | `muse-spark-1.2-contributor-free` | 仅 Responses API（`/chat/completions` 返回 500），文本+图像 | 1M | 131,072 | 到 `xhigh` |
-| `big-pickle` | 匿名 stealth 模型（社区确认底层≈DeepSeek V4 Flash） | 200K | 131,072 | 到 `max` |
+| `big-pickle` | 匿名 stealth 模型（社区确认底层≈DeepSeek V4 Flash） | 200K | 131,072 | 到 `high`（2026-09 实测） |
 | `mimo-v2.5-free` | 多模态系列的文本档 | 200K | 131,072 | 到 `high`（无 `minimal`/`xhigh`/`max`） |
 | `ling-3.0-flash-fin-free` | 新上线免费模型（替代已下线的 `hy3-free`） | 256K | 65,536 | 到 `max` |
 | `laguna-s-2.1-free` | 长时程 agent 编码 | 256K | 131,072 | 到 `max` |
 | `nemotron-3-ultra-free` | 超长上下文（1M） | 1M | 131,072 | 到 `max` |
 | `nemotron-3.5-lightning-free` | 高速执行 | 1M | 131,072 | 到 `max` |
 
-> 🧠 **思考档位**：pi 默认只暴露 `off/minimal/low/medium/high`，`xhigh` 与 `max` 必须由模型在 `thinkingLevelMap` 里显式声明才会出现在 `/think` 里。枚举按**每个模型**实测（每个取值跑 4 次）：`/chat/completions` 上 `big-pickle`、`ling-3.0-flash-fin-free`、`laguna-s-2.1-free`、两个 nemotron 是完整的 `none|minimal|low|medium|high|xhigh|max`；`mimo-v2.5-free` 只吃 `none|low|medium|high`；`/responses`（muse-spark）是 `none|minimal|low|medium|high|xhigh`，没有 `max`。不支持的档位在 `/think` 里直接不出现，也不会被悄悄替换成别的强度。
+> 🧠 **思考档位（运行时自探测，不再硬编码）**：pi 默认只暴露 `off/minimal/low/medium/high`，`xhigh` 与 `max` 必须由模型在 `thinkingLevelMap` 里显式声明才会出现在 `/think` 里。历史上这个枚举是按模型**手写**在代码里的，上游一换血就过时——`big-pickle` 曾声明支持 `max`，而网关现已 100% 拒绝它（返回 HTTP 500 或流内 `[400] Invalid request parameters`）。
 >
-> ⚠️ 探测这类枚举时注意：`mimo-v2.5-free` 对不支持的**取值**只回一句 `[400] Invalid request parameters`，既不点名字段也不给枚举，和「根本不支持这个字段」长得一模一样。只用 `xhigh` 探一次会得出「完全不支持 effort」的错误结论（本项目确实先踩过一次）。必须逐值枚举。
+> 现在扩展在**每次模型校验**时直接从网关重新探测每个模型的档位（`/chat/completions` + `reasoning_effort`，每档 2 次尝试，全部成功才保留），并把结果连同 token 上限一起写入缓存（`.pi/cache/opencode-native-models.json`，24h 内直接复用）。所以上表“思考档位”一列只是**最近一次探测的快照**，下次校验会自动跟随上游变化；被拒绝的档位在 `/think` 里直接不出现，也不会被悄悄替换成别的强度。`muse-spark`（仅 Responses API）无法用 chat 传输探测，保留手工核验的地图。
+>
+> 🛡️ **安全闸**：探测结果永远**不能重新启用**精选表里被明确标为 `null` 的档位（例如 `big-pickle` 的 `max`/`minimal`/`xhigh`）。因为上游波动可能让一个被拒档位短暂返回 200（实测 `big-pickle` 的 `max` 曾在 1-token 探测里 2/2 通过，随后真实请求连续 9 次 HTTP 500）——若放任这个窗口进缓存，会重新引爆同样的报错。档位的“放开”仍由探测动态决定，只是“重新启用已证实不可用的档位”被静态 `null` 挡住，要人工更新精选表才会放开。
+>
+> ⚠️ 探测这类枚举时注意：网关对不支持的**取值**只回一句 `[400] Invalid request parameters`（有时是 HTTP 500），既不点名字段也不给枚举，且同一个取值可能间歇成功/失败。因此探测必须逐值、多次尝试，一次失败即视为不可用——这就是为什么 `big-pickle` 的 `minimal`/`xhigh` 被屏蔽而 `high` 保留。
 
 > 下线/不可用：`hy3-free` 已从 `/v1/models` 消失，调用返回 `Model hy3-free is not supported`，已移出白名单。`deepseek-v4-flash-free` 仍在目录里但调用返回 `Model is unavailable.`，因此不收录。`x-preview-f-free`（Ox Alpha）此前已转付费并移除。
 >
