@@ -689,11 +689,14 @@ const ZEN_FREE_MODELS = [
     // pi hides the xhigh/max thinking levels unless the model names them in
     // thinkingLevelMap (getSupportedThinkingLevels treats those two as opt-in),
     // so without this the gateway's highest effort was unreachable from /think.
-    // /responses accepts none|minimal|low|medium|high|xhigh for this model and
-    // rejects max. This model is the one that runs on pi's own transport rather
-    // than `run`, and pi resolves the off level as thinkingLevelMap.off ?? "none",
-    // so off is spelled out to keep both code paths reading the same map.
-    thinkingLevelMap: { off: "none", xhigh: "xhigh", max: null },
+    // /responses accepts minimal|low|medium|high|xhigh for this model and
+    // REJECTS both none and max: a real pi call with --thinking off was refused
+    // with 400 "reasoning.effort" does not support "none" with this model.
+    // This model runs on pi's own transport rather than `run`, and pi's
+    // openai-responses transport only sends reasoning when `map.off !== null`
+    // (falling back to "none" otherwise), so off MUST be null here to keep the
+    // field off the wire entirely; spelling it as "none" re-activates the 400.
+    thinkingLevelMap: { off: null, xhigh: "xhigh", max: null },
     input: ["text", "image"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 1048576,
@@ -789,17 +792,6 @@ const ZEN_FREE_MODELS = [
   },
 ];
 const SENSENOVA_MODELS = [
-  {
-    id: "sensenova-6.7-flash-lite",
-    name: "SenseNova 6.7 Flash-Lite",
-    api: "openai-completions",
-    reasoning: true,
-    thinkingLevelMap: EFFORT_LEVELS_NO_MINIMAL_MAX,
-    input: ["text", "image"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 262144,
-    maxTokens: 65536,
-  },
   {
     id: "sensenova-6.8-flash-lite",
     name: "SenseNova 6.8 Flash-Lite",

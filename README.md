@@ -144,7 +144,7 @@ pi --model opencode-zen/big-pickle
 
 > 🧠 **思考档位（运行时自探测，不再硬编码）**：pi 默认只暴露 `off/minimal/low/medium/high`，`xhigh` 与 `max` 必须由模型在 `thinkingLevelMap` 里显式声明才会出现在 `/think` 里。历史上这个枚举是按模型**手写**在代码里的，上游一换血就过时——`big-pickle` 曾声明支持 `max`，而网关现已 100% 拒绝它（返回 HTTP 500 或流内 `[400] Invalid request parameters`）。
 >
-> 现在扩展在**每次模型校验**时直接从网关重新探测每个模型的档位（`/chat/completions` + `reasoning_effort`，每档 2 次尝试，全部成功才保留），并把结果连同 token 上限一起写入缓存（`.pi/cache/opencode-native-models.json`，24h 内直接复用）。所以上表“思考档位”一列只是**最近一次探测的快照**，下次校验会自动跟随上游变化；被拒绝的档位在 `/think` 里直接不出现，也不会被悄悄替换成别的强度。`muse-spark`（仅 Responses API）无法用 chat 传输探测，保留手工核验的地图。
+> 现在扩展在**每次模型校验**时直接从网关重新探测每个模型的档位（`/chat/completions` + `reasoning_effort`，每档 2 次尝试，全部成功才保留），并把结果连同 token 上限一起写入缓存（`.pi/cache/opencode-native-models.json`，24h 内直接复用）。所以上表“思考档位”一列只是**最近一次探测的快照**，下次校验会自动跟随上游变化；被拒绝的档位在 `/think` 里直接不出现，也不会被悄悄替换成别的强度。`muse-spark`（仅 Responses API）无法用 chat 传输探测，保留手工核验的地图：实测其 `/responses` 接受 `minimal|low|medium|high|xhigh`，**拒绝 `none` 和 `max`**——真实 pi 调用曾因 `--thinking off` 发出 `reasoning.effort=none` 被 400 拒，`thinkingLevelMap.off` 因此置为 `null`（pi 的 responses 传输在 `map.off===null` 时不发送 reasoning 字段，落到最弱档 `minimal`），`max` 档同样被 `null` 拦下并自动降到 `xhigh`。
 >
 > 🛡️ **安全闸**：探测结果永远**不能重新启用**精选表里被明确标为 `null` 的档位（例如 `big-pickle` 的 `max`/`minimal`/`xhigh`）。因为上游波动可能让一个被拒档位短暂返回 200（实测 `big-pickle` 的 `max` 曾在 1-token 探测里 2/2 通过，随后真实请求连续 9 次 HTTP 500）——若放任这个窗口进缓存，会重新引爆同样的报错。档位的“放开”仍由探测动态决定，只是“重新启用已证实不可用的档位”被静态 `null` 挡住，要人工更新精选表才会放开。
 >
@@ -172,7 +172,6 @@ export SENSENOVA_API_KEY=sk-xxx
 
 | 模型 ID | 说明 | 上下文 | 输出上限 | 思考档位 |
 |---|---|---|---|---|
-| `sensenova-6.7-flash-lite` | 轻量多模态智能体（文本+图像） | 256K | 65,536 | 到 `xhigh`（无 `minimal`/`max`） |
 | `sensenova-6.8-flash-lite` | 新一代轻量多模态智能体（文本+图像） | 256K | 65,536 | 到 `xhigh`（无 `minimal`/`max`） |
 | `deepseek-v4-flash` | DeepSeek 高性能对话（thinking/非 thinking、工具调用） | 1M | 65,536 | 到 `xhigh`（无 `minimal`/`max`） |
 | `deepseek-v4-pro` | DeepSeek 旗舰推理（2026-09 实测免费可用） | 1M | 65,536 | 到 `max` |
@@ -182,6 +181,8 @@ export SENSENOVA_API_KEY=sk-xxx
 | `sensenova-u1.5-lite` | 图像生成/编辑（`/v1/images/generations`、`/v1/images/edits`） | 256K | 65,536 | — |
 
 > 🧠 **思考档位**：SenseNova 也接受 `reasoning_effort`，而且**按模型**校验枚举——`glm-5.2` / `deepseek-v4-pro` / `kimi-k3` 是完整的 `none|minimal|low|medium|high|xhigh|max`，三个 flash 档只有 `none|low|medium|high|xhigh`（传 `minimal` 或 `max` 会 400 `field ReasoningEffort invalid`）。白名单按各自枚举标注，不支持的档位在 `/think` 里直接不出现，而不是被悄悄替换成别的强度。
+>
+> ⚠️ `sensenova-6.7-flash-lite` 仍在 `/v1/models` 目录里，但 2027-02 实测对任意档位调用都返回 404 `model route not found`（目录假活，与 Zen 侧 `deepseek-v4-flash-free` 同类），已从白名单移除。
 
 `sensenova-u1-fast` 和 `sensenova-u1.5-lite` 注册为图像模型，不会误走 chat completions；生成结果保存到 `.pi/generated-images/`，路径在 TUI 中渲染为可点击的 `file://` 链接。
 
