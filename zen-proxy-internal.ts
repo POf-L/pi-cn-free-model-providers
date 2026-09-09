@@ -16,8 +16,55 @@ const ROUND_HEADER = "x-zen-proxy-round"
 const START_TIMEOUT_MS = 60_000
 const POLL_MS = 300
 const LOG_PATH = "D:\\WindowsTemp\\opencode\\zen-proxy-start.log"
-const PYTHON_PATH = process.env.ZEN_PROXY_PYTHON || "D:\\Python312\\python.exe"
-const SCRIPT_PATH = process.env.ZEN_PROXY_SCRIPT || "D:\\项目\\zen_proxy\\zen_proxy.py"
+// The proxy is started from non-tool hooks, so its executable and script must
+// not be caller-configurable.  A model/tool environment that can replace
+// either value would turn chat setup into an arbitrary-process launcher.
+const TRUSTED_PYTHON_PATH = "D:\\Python312\\python.exe"
+const TRUSTED_SCRIPT_PATH = "D:\\项目\\zen_proxy\\zen_proxy.py"
+const PYTHON_PATH = TRUSTED_PYTHON_PATH
+const SCRIPT_PATH = TRUSTED_SCRIPT_PATH
+const TRUSTED_RETRIES = 4
+
+function normalizeWindowsPath(value: string): string {
+  return value.replaceAll("/", "\\").replace(/[\\]+/g, "\\").toLowerCase()
+}
+
+function validateLaunchEnvironment() {
+  const suppliedPython = process.env.ZEN_PROXY_PYTHON
+  const suppliedScript = process.env.ZEN_PROXY_SCRIPT
+  if (suppliedPython && normalizeWindowsPath(suppliedPython) !== normalizeWindowsPath(TRUSTED_PYTHON_PATH)) {
+    throw new Error("zen proxy 拒绝使用非受信 Python；请移除 ZEN_PROXY_PYTHON 覆盖")
+  }
+  if (suppliedScript && normalizeWindowsPath(suppliedScript) !== normalizeWindowsPath(TRUSTED_SCRIPT_PATH)) {
+    throw new Error("zen proxy 拒绝使用非受信脚本；请移除 ZEN_PROXY_SCRIPT 覆盖")
+  }
+
+  const retries = process.env.ZEN_PROXY_RETRIES
+  if (retries !== undefined && !/^[0-6]$/.test(retries.trim())) {
+    throw new Error("zen proxy 拒绝不安全的重试次数；只允许 0 到 6")
+  }
+
+  const upstream = process.env.ZEN_PROXY_UPSTREAM_URL
+  if (!upstream) return
+  let url: URL
+  try {
+    url = new URL(upstream)
+  } catch {
+    throw new Error(`上游地址无效：${upstream}`)
+  }
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
+    throw new Error("zen proxy 拒绝非 HTTP(S) 或带凭据的上游地址")
+  }
+  // Plain HTTP is only acceptable for a loopback test fixture.  Production
+  // traffic must stay on the pinned HTTPS Zen endpoint.
+  const loopback = new Set(["127.0.0.1", "localhost", "::1"]).has(url.hostname.toLowerCase())
+  if (url.protocol === "http:" && !loopback) {
+    throw new Error("zen proxy 拒绝向非本机上游发送明文模型流量")
+  }
+  if (url.protocol === "https:" && url.hostname.toLowerCase() !== "opencode.ai") {
+    throw new Error("zen proxy 拒绝未列入白名单的 HTTPS 上游")
+  }
+}
 
 function log(message: string) {
   try {
@@ -109,8 +156,8 @@ async function isNonZenHttpOccupant(): Promise<boolean> {
 }
 
 function proxyArguments(): string[] {
-  const args = ["-I", "-B", "-u", SCRIPT_PATH, "--port", String(PORT), "--rotation", "0", "--retries", process.env.ZEN_PROXY_RETRIES ?? "2"]
-  if (process.env.ZEN_PROXY_VERBOSE === "1" || process.env.ZEN_PROXY_VERBOSE === "true") args.push("--verbose")
+  validateLaunchEnvironment()
+  const args = ["-I", "-B", "-u", SCRIPT_PATH, "--port", String(PORT), "--rotation", "0", "--retries", String(TRUSTED_RETRIES)]
   const upstream = process.env.ZEN_PROXY_UPSTREAM_URL
   if (!upstream) return args
 
@@ -131,6 +178,7 @@ function proxyArguments(): string[] {
 }
 
 async function launchProxy() {
+  validateLaunchEnvironment()
   if (/[\\/]/.test(PYTHON_PATH) && !existsSync(PYTHON_PATH)) {
     throw new Error(`找不到 Python：${PYTHON_PATH}`)
   }
@@ -167,6 +215,7 @@ let ensurePromise: Promise<void> | null = null
 function ensureZenProxy(): Promise<void> {
   if (ensurePromise) return ensurePromise
   const current = (async () => {
+    validateLaunchEnvironment()
     if (await proxyHealthy()) {
       log(`本地代理已就绪：${HOST}:${PORT}`)
       return
