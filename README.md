@@ -382,6 +382,10 @@ bash ~/.agents/skills/modlens/scripts/run.sh config set provider gemini-api
 
 > 所有 openai 槽位的 key 均从环境变量读取（`AGNES_CN_API_KEY`、`AGNES_API_KEY`、`BIGMODEL_API_KEY`、`SENSENOVA_API_KEY`、`SILICONFLOW_API_KEY`、`ALI_API_KEY`），配置在 `~/.zshrc` 中。
 
+## 单仓布局（D:/项目只剩一个文件夹）
+
+本仓为单仓：`pi-cn-free-model-providers-ext.mjs`是pi扩展入口，`zen_proxy/`是本地Zen漂白代理（`127.0.0.1:8643 -> https://opencode.ai/zen/v1`，`ses_/proj_/req_`轮换），`pi-extensions/zen-proxy-autostart.ts`是pi自启动钩子（新路径优先、旧`D:/项目/zen_proxy`兜底）。旧仓`POf-L/zen_proxy`已归档，只看本仓即可。
+
 ## License
 
 MIT
