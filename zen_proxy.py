@@ -94,7 +94,7 @@ class IdentityMapper:
             key = (scope, prefix, real)
             fake = self.map.get(key)
             if fake is None:
-                fake = prefix + "".join(random.choices(string.ascii_letters + string.digits, k=22))
+                fake = self.random_id(prefix)
                 self.map[key] = fake
             return fake
 
@@ -107,12 +107,18 @@ class IdentityMapper:
             fake = next((self.map.get((scope, prefix, value)) for value in values
                          if self.map.get((scope, prefix, value))), None)
             if fake is None:
-                fake = prefix + "".join(random.choices(string.ascii_letters + string.digits, k=22))
+                fake = self.random_id(prefix)
             for value in values:
                 self.map[(scope, prefix, value)] = fake
             return fake
 
     def random_id(self, prefix):
+        # Zen validates session IDs: keep OpenCode's 12-hex + 14-base62 layout
+        # even when anonymizing. Session timestamps use descending order.
+        if prefix == "ses_":
+            timestamp = (~(int(time.time() * 1000) * 0x1000)) & 0xFFFFFFFFFFFF
+            suffix = "".join(random.choices(string.ascii_letters + string.digits, k=14))
+            return f"{prefix}{timestamp:012x}{suffix}"
         return prefix + "".join(random.choices(string.ascii_letters + string.digits, k=22))
 
     def size(self):

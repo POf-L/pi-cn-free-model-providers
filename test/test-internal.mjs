@@ -141,8 +141,8 @@ try {
   assert.notEqual(first.headers["x-opencode-session"], "real-session");
   assert.notEqual(first.headers["x-session-id"], "real-session-id");
   assert.notEqual(first.headers["x-session-affinity"], "real-affinity");
-  assert.ok(first.headers["x-opencode-session"].startsWith("ses_"));
-  assert.ok(first.headers["x-parent-session-id"].startsWith("ses_"));
+  assert.match(first.headers["x-opencode-session"], /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
+  assert.match(first.headers["x-parent-session-id"], /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
   assert.notEqual(first.headers["x-parent-session-id"], "real-parent");
   assert.ok(first.headers["x-opencode-project"].startsWith("proj_"));
   assert.notEqual(first.headers["x-opencode-project"], "real-project");
@@ -165,7 +165,7 @@ try {
   assert.deepEqual(firstBody.messages, []);
   assert.ok(firstBody.user.startsWith("usr_"));
   assert.notEqual(firstBody.user, "real-user");
-  assert.ok(firstBody.metadata.sessionID.startsWith("ses_"));
+  assert.match(firstBody.metadata.sessionID, /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
   assert.equal(firstBody.metadata.tier, "free");
   assert.equal(second.headers["x-opencode-session"], firstFakeSession);
   assert.equal(second.headers["x-opencode-project"], first.headers["x-opencode-project"]);
@@ -184,7 +184,7 @@ try {
   });
   assert.equal(blankResponse.status, 200);
   const blank = captured.at(-1);
-  assert.ok(blank.headers["x-opencode-session"].startsWith("ses_"));
+  assert.match(blank.headers["x-opencode-session"], /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
   assert.ok(blank.headers["x-opencode-project"].startsWith("proj_"));
   assert.ok(blank.headers["x-request-id"].startsWith("req_"));
   assert.equal(blank.headers["x-opencode-client"], "cli");
