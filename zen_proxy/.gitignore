@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# 运行日志
+*.log
+*.log.err
+
+# 调试残留
+*.der
+
+# 无关依赖残留
+node_modules/
