@@ -20,7 +20,8 @@ const LOG_PATH = "D:\\WindowsTemp\\opencode\\zen-proxy-start.log"
 // not be caller-configurable.  A model/tool environment that can replace
 // either value would turn chat setup into an arbitrary-process launcher.
 const TRUSTED_PYTHON_PATH = "D:\\Python312\\python.exe"
-const TRUSTED_SCRIPT_PATH = "D:\\项目\\zen_proxy\\zen_proxy.py"
+const TRUSTED_SCRIPT_PATH = "D:\\项目\\pi-cn-free-model-providers\\zen_proxy\\zen_proxy.py"
+const LEGACY_SCRIPT_PATH = "D:\\项目\\zen_proxy\\zen_proxy.py"
 const PYTHON_PATH = TRUSTED_PYTHON_PATH
 const SCRIPT_PATH = TRUSTED_SCRIPT_PATH
 const TRUSTED_RETRIES = 4
@@ -35,7 +36,7 @@ function validateLaunchEnvironment() {
   if (suppliedPython && normalizeWindowsPath(suppliedPython) !== normalizeWindowsPath(TRUSTED_PYTHON_PATH)) {
     throw new Error("zen proxy 拒绝使用非受信 Python；请移除 ZEN_PROXY_PYTHON 覆盖")
   }
-  if (suppliedScript && normalizeWindowsPath(suppliedScript) !== normalizeWindowsPath(TRUSTED_SCRIPT_PATH)) {
+  if (suppliedScript && ![TRUSTED_SCRIPT_PATH, LEGACY_SCRIPT_PATH].some((p) => normalizeWindowsPath(suppliedScript) === normalizeWindowsPath(p))) {
     throw new Error("zen proxy 拒绝使用非受信脚本；请移除 ZEN_PROXY_SCRIPT 覆盖")
   }
 
