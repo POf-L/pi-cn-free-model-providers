@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from "no
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
-import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { compact, createCodingTools, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Image, Markdown } from "@earendil-works/pi-tui";
 
 // ── Clickable file links ──────────────────────────────────────────────────
@@ -89,9 +89,17 @@ function generateOpenCodeId(prefix) {
 }
 const SESSION_ID = generateOpenCodeId("ses_");
 const OPENCODE_STATIC_HEADERS = {
-  "User-Agent": "opencode/1.15.5",
+  // The free tier reports UpgradeRequired for clients older than 1.17.0.
+  "User-Agent": "opencode/1.18.31",
   "x-opencode-client": "cli",
 };
+function openCodeHeaders() {
+  return {
+    ...OPENCODE_STATIC_HEADERS,
+    "x-opencode-session": SESSION_ID,
+    "x-opencode-request": generateOpenCodeId("msg_"),
+  };
+}
 // Every Zen call goes through one place so a local relay can be substituted.
 // `OPENCODE_ZEN_BASE_URL` exists because the gateway refuses some models with
 // `RegionError` depending on the caller's identity/region; users who front it
@@ -321,18 +329,28 @@ function handleSSELine(state, line) {
 async function consumeSSEStream(state, reader) {
   const decoder = new TextDecoder();
   let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+  try {
     while (true) {
-      const lineEnd = buffer.indexOf("\n");
-      if (lineEnd === -1) break;
-      const line = buffer.substring(0, lineEnd).trim();
-      buffer = buffer.substring(lineEnd + 1);
-      const done2 = handleSSELine(state, line);
-      if (done2) break;
+      const { done, value } = await reader.read();
+      if (done) {
+        buffer += decoder.decode();
+        if (buffer.trim()) handleSSELine(state, buffer.trim());
+        return;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      while (true) {
+        const lineEnd = buffer.indexOf("\n");
+        if (lineEnd === -1) break;
+        const line = buffer.substring(0, lineEnd).trim();
+        buffer = buffer.substring(lineEnd + 1);
+        // [DONE] ends the response, not just this chunk's line loop. Waiting
+        // for the gateway to close a keep-alive stream can otherwise hang Pi.
+        if (handleSSELine(state, line)) return;
+      }
     }
+  } finally {
+    try { await reader.cancel(); } catch {}
+    reader.releaseLock();
   }
 }
 
@@ -491,16 +509,22 @@ function makeOpenAIStream(baseUrl, envKey, opts = {}) {
 function streamOpenCode(model, context, options) {
   const stream = new AssistantMessageEventStream();
   const output = makeOutput(model);
-  run(stream, output, model, context, options, {
+  // OpenCode free tier requires non-empty tools on chat completions. When Pi
+  // sends an empty tool loadout (e.g. prompt after compaction before tool declarations),
+  // provide coding-tool schemas with tool_choice=none so the gateway accepts it.
+  const hasTools = Array.isArray(context.tools) && context.tools.length > 0;
+  const effectiveContext = hasTools
+    ? context
+    : { ...context, tools: createCodingTools(process.cwd()) };
+  const effectiveOptions = hasTools
+    ? options
+    : { ...options, toolChoice: options?.toolChoice ?? "none" };
+  run(stream, output, model, effectiveContext, effectiveOptions, {
     url: `${ZEN_BASE_URL}/chat/completions`,
     envKey: "OPENCODE_API_KEY",
     key: () => process.env.OPENCODE_API_KEY
       ?? (options?.apiKey && options.apiKey !== "public" ? options.apiKey : "public"),
-    headers: () => ({
-      ...OPENCODE_STATIC_HEADERS,
-      "x-opencode-session": SESSION_ID,
-      "x-opencode-request": generateOpenCodeId("msg_"),
-    }),
+    headers: openCodeHeaders,
     maxTokens: model.maxTokens ?? 128000,
   });
   return stream;
@@ -566,6 +590,7 @@ async function run(stream, output, model, context, options, cfg) {
       stream: true,
       stream_options: { include_usage: true },
       ...(tools && tools.length > 0 ? { tools } : {}),
+      ...(options?.toolChoice !== undefined ? { tool_choice: options.toolChoice } : {}),
       max_tokens: maxTokens,
     };
     if (cfg.cleanBody) body = cfg.cleanBody(body);
@@ -689,13 +714,25 @@ const ZEN_FREE_MODELS = [
     // pi hides the xhigh/max thinking levels unless the model names them in
     // thinkingLevelMap (getSupportedThinkingLevels treats those two as opt-in),
     // so without this the gateway's highest effort was unreachable from /think.
-    // /responses accepts minimal|low|medium|high|xhigh for this model and
-    // REJECTS both none and max: a real pi call with --thinking off was refused
-    // with 400 "reasoning.effort" does not support "none" with this model.
-    // This model runs on pi's own transport rather than `run`, and pi's
-    // openai-responses transport only sends reasoning when `map.off !== null`
-    // (falling back to "none" otherwise), so off MUST be null here to keep the
-    // field off the wire entirely; spelling it as "none" re-activates the 400.
+    // /responses accepts none|minimal|low|medium|high|xhigh for this model and
+    // rejects max. This model is the one that runs on pi's own transport rather
+    // than `run`, and pi resolves the off level as thinkingLevelMap.off ?? "none",
+    // so off is spelled out to keep both code paths reading the same map.
+    thinkingLevelMap: { off: "none", xhigh: "xhigh", max: null },
+    input: ["text", "image"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 1048576,
+    maxTokens: 131072,
+  },
+  {
+    // Responses-only. Gateway accepts minimal|low|medium|high|xhigh. It explicitly
+    // rejects 'none' AND returns 400 invalid_request_error on 'max'.
+    // Nulling out off & max clamps Pi's 'off' to 'minimal' and 'max' to 'xhigh',
+    // preventing invalid parameter rejections when the user's default thinking is max.
+    id: "muse-spark-1.3-contributor-free",
+    name: "Muse Spark 1.3 Free",
+    api: "openai-responses",
+    reasoning: true,
     thinkingLevelMap: { off: null, xhigh: "xhigh", max: null },
     input: ["text", "image"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -734,19 +771,6 @@ const ZEN_FREE_MODELS = [
     maxTokens: 65536,
   },
   {
-    // Context window corrected from 200000: the gateway reports "maximum
-    // context length is 262144 tokens", and max_tokens 262000 is accepted.
-    id: "laguna-s-2.1-free",
-    name: "Laguna S 2.1 Free",
-    api: "openai-completions",
-    reasoning: true,
-    thinkingLevelMap: EFFORT_LEVELS_ALL,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 262144,
-    maxTokens: 131072,
-  },
-  {
     // Context window confirmed by the gateway ("maximum context length is
     // 1000000 tokens"); max_tokens 999000 is accepted, so 131072 is a practical
     // registered ceiling rather than a hard upstream limit.
@@ -761,6 +785,20 @@ const ZEN_FREE_MODELS = [
     maxTokens: 131072,
   },
   {
+    // Completion ceiling verified: max_tokens 200000 is rejected with "supports
+    // at most 131072 completion tokens". contextWindow is inherited and not
+    // independently verified (see mimo-v2.5-free above).
+    id: "big-pickle",
+    name: "Big Pickle",
+    api: "openai-completions",
+    reasoning: true,
+    thinkingLevelMap: EFFORT_LEVELS_ALL,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 200000,
+    maxTokens: 131072,
+  },
+  {
     id: "nemotron-3.5-lightning-free",
     name: "Nemotron 3.5 Lightning Free",
     api: "openai-completions",
@@ -771,27 +809,19 @@ const ZEN_FREE_MODELS = [
     contextWindow: 1000000,
     maxTokens: 131072,
   },
-  {
-    // Completion ceiling verified: max_tokens 200000 is rejected with "supports
-    // at most 131072 completion tokens". contextWindow is inherited and not
-    // independently verified (see mimo-v2.5-free above).
-    // Static fallback only: the per-model effort map and token ceilings are
-    // re-probed from the gateway on each verify pass (see verifyZenModels), so
-    // this entry just has to be right enough until the first pass completes.
-    // Current upstream reality (probed): max/minimal/xhigh are refused, only
-    // none|low|medium|high are stable — hence EFFORT_LEVELS_BASIC, not ALL.
-    id: "big-pickle",
-    name: "Big Pickle",
-    api: "openai-completions",
-    reasoning: true,
-    thinkingLevelMap: EFFORT_LEVELS_BASIC,
-    input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 200000,
-    maxTokens: 131072,
-  },
 ];
 const SENSENOVA_MODELS = [
+  {
+    id: "sensenova-6.7-flash-lite",
+    name: "SenseNova 6.7 Flash-Lite",
+    api: "openai-completions",
+    reasoning: true,
+    thinkingLevelMap: EFFORT_LEVELS_NO_MINIMAL_MAX,
+    input: ["text", "image"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 262144,
+    maxTokens: 65536,
+  },
   {
     id: "sensenova-6.8-flash-lite",
     name: "SenseNova 6.8 Flash-Lite",
@@ -840,8 +870,10 @@ const SENSENOVA_MODELS = [
     maxTokens: 65536,
   },
   {
-    // Free per /v1/models pricing; verified with a live call (returns
-    // reasoning_content, and max_tokens 999999 is not rejected).
+    // Verified against https://token.sensenova.cn/v1/models (2026-09-13):
+    // text-only, 1048576 context, 65536 max output, zero pricing, tools/reasoning.
+    // ReasoningEffort validation lists none|minimal|low|medium|high|xhigh|max.
+    // Use the catalog output limit, not an unverified larger max_tokens value.
     id: "kimi-k3",
     name: "Kimi K3 (via SenseNova)",
     api: "openai-completions",
@@ -1046,202 +1078,149 @@ async function filterToLive(curated, url, headers, signal) {
 // /v1/models exposes no pricing and paid models keep "-free" ids, so freeness
 // is verified by probing: a tiny chat completion per model.
 //
-// Probing always uses the anonymous "public" key, EVEN when a real
-// OPENCODE_API_KEY is configured: free models answer 200 while paid ones are
-// rejected during auth (401/402/403) before a single token is billed. The
-// key-based variant (accept the answer, then read `cost`) does bill the paid
-// models it probes — one output token each across ~50 paid ids per startup —
-// so it is only used as a fallback when the anonymous attempt was inconclusive
-// (e.g. the shared free quota answered 429).
+// Always try the anonymous "public" key first, even with OPENCODE_API_KEY:
+// explicit auth/billing rejections settle paid status without spending tokens.
+// Region, client-version and quota errors are inconclusive, not pricing data.
+// A configured key is only a fallback on inconclusive probes; those requests
+// may bill up to 1 chat token or 16 Responses tokens and need an explicit cost.
 //
 // Returns { status, api } where status is "free" (verified), "paid" (verified
-// not free), or "unknown" (network/shape errors — the caller keeps curated
-// models on unknown, so a transient outage never wipes the list). `api` is the
-// endpoint the model actually answered on.
+// not free), or "unknown" (network/shape errors). Strict verification excludes
+// unknowns, including curated ones. `api` is the endpoint that answered.
 //
 // Some Zen models are Responses-API only: muse-spark-1.2-contributor-free
 // answers 500 on /chat/completions and 200 with cost "0" on /responses. Probing
 // only chat completions classified those as "unknown" forever, so they could
 // never enter the list even though they are free and usable.
-function zenRequestHeaders(apiKey = "public") {
+function zenRequestHeaders(apiKey = "public", api = "openai-completions") {
   return {
     "Content-Type": "application/json",
-    ...OPENCODE_STATIC_HEADERS,
-    "x-opencode-session": SESSION_ID,
-    "x-opencode-request": generateOpenCodeId("msg_"),
-    Authorization: `Bearer ${apiKey}`,
+    ...openCodeHeaders(),
+    ...(api === "anthropic-messages"
+      ? { "x-api-key": apiKey, "anthropic-version": "2023-06-01" }
+      : { Authorization: `Bearer ${apiKey}` }),
   };
 }
 
-async function probeFreeStatus(modelId, signal) {
+function zenProbePath(api) {
+  if (api === "anthropic-messages") return "/messages";
+  return api === "openai-responses" ? "/responses" : "/chat/completions";
+}
+
+// The free tier checks request shape as well as headers. Reuse Pi's actual
+// coding-tool schemas and streaming transport; probes never execute tools.
+let zenProbeTools;
+function getZenProbeTools() {
+  return zenProbeTools ??= normalizeTools(createCodingTools(process.cwd()));
+}
+
+function zenProbeBody(modelId, api, maxTokens = 1) {
+  const tools = getZenProbeTools();
+  const prompt = "Reply exactly OK. Do not call any tools.";
+  const model = ZEN_FREE_MODELS.find((entry) => entry.id === modelId);
+  if (api === "anthropic-messages") {
+    return {
+      model: modelId, messages: [{ role: "user", content: prompt }],
+      stream: true, max_tokens: maxTokens,
+      tools: tools.map(({ function: fn }) => ({
+        name: fn.name, description: fn.description, input_schema: fn.parameters,
+      })),
+    };
+  }
+  return api === "openai-responses"
+    ? {
+        model: modelId, input: prompt, stream: true, max_output_tokens: Math.max(16, maxTokens),
+        tools: tools.map(({ function: fn }) => ({ type: "function", ...fn, strict: false })),
+        ...(model?.thinkingLevelMap?.off === null ? { reasoning: { effort: "minimal" } } : {}),
+      }
+    : {
+        model: modelId, messages: [{ role: "user", content: prompt }],
+        stream: true, stream_options: { include_usage: true }, tools, max_tokens: maxTokens,
+      };
+}
+
+function zenProbeErrorStatus(status, text) {
+  if (status === 404 || /model\b[^.]{0,64}(is unavailable|not supported|not found|does not exist)/i.test(text)) {
+    return "gone";
+  }
+  // Client, region, version and quota restrictions say nothing about pricing.
+  if (/FreeTierError|RegionError|UpgradeRequired|RateLimit|free tier can only|not available in your country/i.test(text)) {
+    return "unknown";
+  }
+  if ([401, 402].includes(status) || /AuthError|missing api key|invalid_api_key|InsufficientBalance|insufficient[ _-]?(balance|credits)|PaymentRequired|BillingError/i.test(text)) {
+    return "paid";
+  }
+  return "unknown";
+}
+
+async function readZenProbeResult(res, key) {
+  const text = await res.text();
+  if (!res.ok) return zenProbeErrorStatus(res.status, text);
+  const payloads = [];
+  if (res.headers.get("content-type")?.includes("text/event-stream")) {
+    let completed = false;
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (data === "[DONE]") { completed = true; continue; }
+      if (!data) continue;
+      try {
+        const payload = JSON.parse(data);
+        payloads.push(payload);
+        if (payload.type === "response.completed" || payload.type === "response.incomplete" || payload.type === "message_stop") completed = true;
+      } catch { return "unknown"; }
+    }
+    if (!completed) return "unknown";
+  } else {
+    try { payloads.push(JSON.parse(text)); } catch { return "unknown"; }
+  }
+  if (payloads.some((p) => p.error || p.type === "error" || p.type === "response.failed" || p.response?.error)) {
+    return zenProbeErrorStatus(res.status, text);
+  }
+  if (!payloads.some((p) => p.choices?.length || p.type === "response.completed" || p.object === "response" ||
+    p.type === "response.incomplete" || p.response?.status === "incomplete" ||
+    p.type === "message" || (p.type === "message_start" && p.message?.type === "message"))) {
+    return "unknown";
+  }
+  if (key === "public") return "free";
+  // A real key may serve paid models. Missing cost is not evidence of zero cost.
+  const reported = payloads.map((p) => p.cost ?? p.response?.cost ?? p.message?.cost).filter((cost) => cost !== undefined && cost !== null);
+  if (!reported.length) return "unknown";
+  const costs = reported.map(Number);
+  if (costs.some((cost) => !Number.isFinite(cost) || cost < 0)) return "unknown";
+  return costs.some((cost) => cost > 0) ? "paid" : "free";
+}
+
+async function probeFreeStatus(modelId, signal, preferredApi = "openai-completions") {
   const apiKey = process.env.OPENCODE_API_KEY;
-  const attempt = async (path, body, key) => {
+  const attempt = async (api, body, key) => {
     let res;
     try {
-      res = await fetch(`${ZEN_BASE_URL}${path}`, {
+      res = await fetch(`${ZEN_BASE_URL}${zenProbePath(api)}`, {
         method: "POST",
-        headers: zenRequestHeaders(key),
+        headers: zenRequestHeaders(key, api),
         body: JSON.stringify(body),
         signal: boundedSignal(20000, signal),
       });
+      return await readZenProbeResult(res, key);
     } catch {
       return "unknown";
     }
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      // A model the gateway itself says it does not have is gone, whatever the
-      // status code happens to be (hy3-free answered 401 "Model hy3-free is not
-      // supported", deepseek-v4-flash-free answers 400 "Model is unavailable.").
-      // The wording must be about the MODEL: laguna-s-2.1-free's transient 503
-      // reads "Endpoint is unavailable." and must stay "unknown".
-      if (res.status === 404 || /model\b[^.]{0,64}(is unavailable|not supported|not found|does not exist)/i.test(text)) {
-        return "gone";
-      }
-      // Auth/billing rejection = verified not free. Anything else (5xx, rate
-      // limit) says nothing about pricing — treat as unknown.
-      return [401, 402, 403].includes(res.status) ? "paid" : "unknown";
-    }
-    let json;
-    try { json = await res.json(); } catch { return "unknown"; }
-    // Anonymous 200 means the free tier served it. With a real key even paid
-    // models answer, so freeness has to come from the reported cost.
-    if (key === "public") return "free";
-    return Number(json?.cost ?? 0) === 0 ? "free" : "paid";
   };
 
-  const chatBody = { model: modelId, messages: [{ role: "user", content: "hi" }], max_tokens: 1 };
-  const responsesBody = { model: modelId, input: "hi" };
+  const transports = [...new Set([preferredApi, "openai-completions", "openai-responses", "anthropic-messages"])];
   const settled = (status) => status === "free" || status === "paid";
-
-  const chat = await attempt("/chat/completions", chatBody, "public");
-  if (settled(chat)) return { status: chat, api: "openai-completions" };
-
-  // Only retry on the other transport when chat completions did not settle it:
-  // a verified "paid" or "free" answer is final, and a second call would spend
-  // another request against the shared free quota. "gone" is not final here —
-  // Responses-API-only models can reject the chat transport outright.
-  const responses = await attempt("/responses", responsesBody, "public");
-  if (settled(responses)) return { status: responses, api: "openai-responses" };
-
-  // Anonymous probing was inconclusive on both transports. A configured key can
-  // still settle it (at the cost of one output token on paid models).
-  if (apiKey) {
-    const keyedChat = await attempt("/chat/completions", chatBody, apiKey);
-    if (settled(keyedChat)) return { status: keyedChat, api: "openai-completions" };
-    const keyedResponses = await attempt("/responses", responsesBody, apiKey);
-    if (settled(keyedResponses)) return { status: keyedResponses, api: "openai-responses" };
-    if (keyedChat === "gone" && keyedResponses === "gone") return { status: "gone", api: "openai-completions" };
-    return { status: "unknown", api: "openai-completions" };
-  }
-  // Only call it gone when BOTH transports said so: one "gone" plus one
-  // inconclusive answer could still be a transport quirk plus an outage.
-  if (chat === "gone" && responses === "gone") return { status: "gone", api: "openai-completions" };
-  return { status: "unknown", api: "openai-completions" };
-}
-
-// ── reasoning_effort enumeration probing (replaces hardcoded stale maps) ──
-// The gateway never publishes the accepted reasoning_effort values: /v1/models
-// carries only id/object/created/owned_by. Each curated thinkingLevelMap was
-// written from a single manual measurement and goes stale the moment the
-// upstream rotates — big-pickle's static map still sends "max" while the
-// gateway now rejects it 100% of the time. So accepted values are re-probed
-// from the gateway on every verify pass, exactly like the token ceilings.
-//
-// Upstream rejection is intermittent: a refused value surfaces as either an
-// HTTP 500 or a streamed `[400] Invalid request parameters` (never a field name
-// or enum), and - unlike mimo-v2.5-free's old behaviour - a value can pass
-// sometimes and fail other times. A value is therefore kept only if EVERY
-// attempt succeeds: one failure marks the level unusable, because re-serving a
-// level that fails 1-in-4 is worse than hiding it from /think. Attempts use
-// max_tokens 1, so a supported level costs a single output token.
-const EFFORT_VALUES = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
-// "none" is the model's default level, so if IT fails the upstream is plainly
-// flaking (throttling/instability) and the whole probe is untrustworthy — the
-// caller keeps the curated map instead. This guards against garbage like a
-// model that "only accepts xhigh and max": measured once when the shared free
-// tier was mid-throttle.
-const EFFORT_PROBE_ATTEMPTS = 2;
-
-async function probeEffortValue(modelId, effort, signal) {
-  const body = {
-    model: modelId,
-    messages: [{ role: "user", content: "hi" }],
-    max_tokens: 1,
-    stream: true,
-    ...(effort ? { reasoning_effort: effort } : {}),
-  };
-  let res;
-  try {
-    res = await fetch(`${ZEN_BASE_URL}/chat/completions`, {
-      method: "POST",
-      headers: zenRequestHeaders(),
-      body: JSON.stringify(body),
-      signal: boundedSignal(20000, signal),
-    });
-  } catch {
-    return false; // network/abort: conservatively treated as unsupported
-  }
-  if (!res.ok) return false; // HTTP 400/500 => refused
-  // A refusal can still hide inside an otherwise-200 stream, so drain it and
-  // watch for the SSE `error` event (the `[400] Invalid request parameters`).
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    while (true) {
-      const lineEnd = buffer.indexOf("\n");
-      if (lineEnd === -1) break;
-      const line = buffer.slice(0, lineEnd).trim();
-      buffer = buffer.slice(lineEnd + 1);
-      if (!line.startsWith("data:")) continue;
-      const data = line.slice(5).trim();
-      if (data === "[DONE]") return true;
-      try {
-        if (JSON.parse(data).error) return false;
-      } catch {}
+  let statuses = [];
+  for (const key of apiKey && apiKey !== "public" ? ["public", apiKey] : ["public"]) {
+    statuses = [];
+    for (const api of transports) {
+      const status = await attempt(api, zenProbeBody(modelId, api), key);
+      if (settled(status)) return { status, api };
+      statuses.push(status);
     }
   }
-  return true;
-}
-
-// Returns a full thinkingLevelMap ({ off: "none", minimal|low|…|max } with
-// null for refused levels) or null when the probe could not complete — an
-// incomplete probe must not masquerade as "no levels supported", so the caller
-// keeps the curated map in that case.
-// staticMap is the curated map, used as a CEILING: a level the curated entry
-// marks null (empirically refused, e.g. big-pickle's max) can never be
-// re-enabled by a probe — upstream flakiness occasionally makes a refused
-// level answer 200 for a short window (measured: big-pickle's max passed two
-// 1-token probes at 11:49, then answered HTTP 500 nine times in a row at
-// 12:05), and letting that window leak into the cache would re-arm the exact
-// failure this whole mechanism exists to prevent. Levels the curated map does
-// not null stay fully probe-driven.
-async function probeEffortMap(modelId, signal, staticMap) {
-  const map = {};
-  for (const value of EFFORT_VALUES) {
-    if (signal?.aborted) return null;
-    // Static ceiling: never re-enable a level the curated entry refuses.
-    if (staticMap?.[value] === null) {
-      map[value] = null;
-      continue;
-    }
-    let ok = 0;
-    for (let attempt = 0; attempt < EFFORT_PROBE_ATTEMPTS; attempt++) {
-      if (signal?.aborted) return null;
-      if (await probeEffortValue(modelId, value, signal)) ok++;
-    }
-    map[value] = ok === EFFORT_PROBE_ATTEMPTS ? value : null;
-  }
-  // Nearly everything refused in one pass almost certainly means a transient
-  // network/stall issue rather than a model that really accepts one value out
-  // of seven — refuse to replace the curated map with that artifact. Likewise
-  // a failed "none" (the default level) marks the whole probe unreliable.
-  const refused = EFFORT_VALUES.filter((value) => map[value] === null).length;
-  if (refused >= EFFORT_VALUES.length - 1 || map.none === null) return null;
-  return { off: "none", ...map };
+  // All transports must agree before removing a model.
+  return { status: statuses.every((status) => status === "gone") ? "gone" : "unknown", api: preferredApi };
 }
 // Run async fn over items with bounded concurrency.
 async function mapLimit(items, limit, fn) {
@@ -1290,20 +1269,21 @@ function parseZenLimits(text) {
 }
 
 async function discoverZenLimits(modelId, api, signal) {
-  const path = api === "openai-responses" ? "/responses" : "/chat/completions";
-  const body = api === "openai-responses"
-    ? { model: modelId, input: "hi", max_output_tokens: 99999999 }
-    : { model: modelId, messages: [{ role: "user", content: "hi" }], max_tokens: 99999999 };
+  const path = zenProbePath(api);
+  const body = zenProbeBody(modelId, api, 99999999);
   try {
     const res = await fetch(`${ZEN_BASE_URL}${path}`, {
       method: "POST",
-      headers: zenRequestHeaders(),
+      headers: zenRequestHeaders("public", api),
       body: JSON.stringify(body),
       signal: boundedSignal(20000, signal),
     });
     // A 200 would mean the ceiling is above our absurd ask; nothing to learn,
     // and the response is a real (free) completion, so just ignore it.
-    if (res.ok) return {};
+    if (res.ok) {
+      await res.body?.cancel();
+      return {};
+    }
     const limits = parseZenLimits(await res.text());
     // Never let a parsed output ceiling exceed the context window.
     if (limits.maxTokens && limits.contextWindow) {
@@ -1314,98 +1294,69 @@ async function discoverZenLimits(modelId, api, signal) {
     return {};
   }
 }
-// Verify the whole live Zen list by probing every id. Curated entries keep their
-// hand-verified metadata; unknown ones get their limits discovered from the
-// gateway. This catches models that switched from free to paid while staying
-// listed — they are dropped exactly like renamed/removed ones.
-//
-// A probe that came back "unknown" (5xx, rate limit, timeout) says nothing about
-// pricing, so a curated model is KEPT on unknown: a single upstream hiccup used
-// to silently remove a vouched model from the session's catalog (observed with
-// laguna-s-2.1-free answering 503 "Endpoint is unavailable."). Non-curated
-// unknowns are still skipped — nothing is known about them, so registering them
-// would be a guess.
+// Strict mode: only ids that probe "free" are registered. Curated entries are
+// metadata, not proof — an unknown (5xx, rate limit, timeout, region or
+// upstream-unavailable) is dropped exactly like paid/gone, so All only shows
+// models that just answered a free probe.
 async function verifyZenModels(liveIds, signal) {
   const known = new Map(ZEN_FREE_MODELS.map((m) => [m.id, m]));
   const ids = [...liveIds];
-  // Curated chat models are the ones users actually pick, so their effort maps
-  // and token ceilings are probed IN PARALLEL with the freeness sweep instead
-  // of after it: the sweep is the slow part (dozens of ids, 12 at a time), and
-  // waiting for it spent the whole time budget before a single effort value was
-  // measured (observed: 180s budget exhausted during the sweep, effort probing
-  // aborted mid-way, cache never updated). Responses-only models keep their
-  // (already correct) curated map — /chat/completions cannot probe them.
-  const curatedChat = ZEN_FREE_MODELS.filter((m) => m.api === "openai-completions");
-  const [probes, effortMaps, ceilings] = await Promise.all([
-    mapLimit(ids, 12, (id) => probeFreeStatus(id, signal)),
-    mapLimit(curatedChat, 4, (m) => probeEffortMap(m.id, signal, m.thinkingLevelMap)),
-    mapLimit(curatedChat, 4, (m) => discoverZenLimits(m.id, "openai-completions", signal)),
-  ]);
-  const effortByModel = new Map(curatedChat.map((m, index) => [m.id, effortMaps[index]]));
-  const ceilingByModel = new Map(curatedChat.map((m, index) => [m.id, ceilings[index]]));
+  // Curated models (known whitelist) probe with high priority and smaller concurrency
+  // to avoid rate limits on the local relay. Then discovered models probe.
+  const curatedIds = ids.filter((id) => known.has(id));
+  const otherIds = ids.filter((id) => !known.has(id));
+  const sortedIds = [...curatedIds, ...otherIds];
+  const probes = await mapLimit(sortedIds, 4, (id) => probeFreeStatus(id, signal, known.get(id)?.api));
   const verified = [];
   const discovered = [];
-  for (let i = 0; i < ids.length; i++) {
+  for (let i = 0; i < sortedIds.length; i++) {
     const probe = probes[i];
-    const curated = known.get(ids[i]);
-    if (probe?.status === "paid" || probe?.status === "gone") continue;
-    if (probe?.status !== "free" && !curated) continue;
+    if (probe?.status !== "free") continue;
+    const curated = known.get(sortedIds[i]);
     if (curated) {
       // A model that only answers on /responses must be registered with that
       // api, otherwise the chat-completions transport is used at runtime and
-      // every request fails. An unknown probe carries no usable api signal, so
-      // the curated value stands.
-      const api = probe?.status === "free" ? probe.api : curated.api;
-      let next = api === curated.api ? curated : { ...curated, api };
-      if (api === "openai-completions") {
-        next = { ...next };
-        const effort = effortByModel.get(curated.id);
-        // A null map means the probe could not finish; keep the curated fallback.
-        if (effort) next.thinkingLevelMap = effort;
-        const c = ceilingByModel.get(curated.id);
-        if (c?.contextWindow) next.contextWindow = c.contextWindow;
-        if (c?.maxTokens) next.maxTokens = c.maxTokens;
-      }
-      verified.push(next);
+      // every request fails.
+      verified.push(probe.api === curated.api ? curated : { ...curated, api: probe.api });
     } else {
-      discovered.push({ id: ids[i], api: probe.api });
+      discovered.push({ id: sortedIds[i], api: probe.api });
     }
   }
   const limits = await mapLimit(discovered, 6, (m) => discoverZenLimits(m.id, m.api, signal));
-  // Discovered models are left with no effort map (no reasoning_effort sent) to
-  // keep the anonymous shared quota for the models users actually pick; only
-  // their token limits are discovered.
   discovered.forEach((m, index) => verified.push(makeDiscoveredModel(m.id, m.api, limits[index] ?? {})));
-  if (verified.length) return verified;
-  const kept = ZEN_FREE_MODELS.filter((m) => liveIds.has(m.id));
-  return kept.length ? kept : ZEN_FREE_MODELS;
+  return verified;
 }
 
 // ── Extension entry ──
-// ── Non-blocking startup: register curated/cached lists immediately, then
-// drift-detect live in the background so Pi never waits on the network. ──
+// ── Non-blocking startup: Zen uses a verified cache, SenseNova uses seed/cache
+// metadata. Refresh in the background so Pi never waits on the network. ──
 
 const OPENCODE_CACHE_FILE = join(homedir(), ".pi", "cache", "opencode-native-models.json");
 const OPENCODE_CACHE_TTL = 24 * 60 * 60 * 1000;
-// Bump when the cache schema or the meaning of a cached field changes (e.g. when
-// effort maps started being probed at runtime), so a stale on-disk cache with an
-// outdated thinkingLevelMap is dropped instead of overriding the new behaviour.
-const OPENCODE_CACHE_VERSION = 2;
 // Re-verifying costs one probe request per live Zen model (~60) against a free
 // tier that is shared between all anonymous users, so doing it on every pi
 // launch burns quota that the user would rather spend on actual completions.
 // A fresh cache is trusted for this long before another sweep is scheduled.
 const OPENCODE_VERIFY_TTL = 6 * 60 * 60 * 1000;
+// Unversioned caches came from the permissive verifier and may contain models
+// that never passed a probe. Never relabel those entries as verified.
+const ZEN_VERIFICATION_VERSION = 2;
 
 function cacheIsFresh(cache, ttl) {
-  return !!cache && typeof cache.timestamp === "number" && Date.now() - cache.timestamp < ttl;
+  const age = Date.now() - cache?.timestamp;
+  return Number.isFinite(age) && age >= 0 && age < ttl;
+}
+
+function zenCacheIsVerified(cache) {
+  const proof = cache?.zenVerification;
+  return proof?.version === ZEN_VERIFICATION_VERSION && proof.baseUrl === ZEN_BASE_URL &&
+    cacheIsFresh({ timestamp: proof.checkedAt }, OPENCODE_VERIFY_TTL) && Array.isArray(cache.zen);
 }
 
 function loadCache() {
   try {
     const data = JSON.parse(readFileSync(OPENCODE_CACHE_FILE, "utf-8"));
     if (!data || typeof data.timestamp !== "number") return null;
-    if (data.version !== OPENCODE_CACHE_VERSION) return null; // stale schema
     if (Date.now() - data.timestamp > OPENCODE_CACHE_TTL) return null;
     return data;
   } catch {
@@ -1413,7 +1364,7 @@ function loadCache() {
   }
 }
 
-function saveCache(models) {
+function saveCache(models, zenVerification = null) {
   try {
     const dir = dirname(OPENCODE_CACHE_FILE);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
@@ -1426,7 +1377,7 @@ function saveCache(models) {
         ? list.map(({ opencodeLiveModel: _live, capabilities: _caps, ...rest }) => rest)
         : list;
     }
-    writeFileSync(OPENCODE_CACHE_FILE, JSON.stringify({ timestamp: Date.now(), version: OPENCODE_CACHE_VERSION, ...slim }));
+    writeFileSync(OPENCODE_CACHE_FILE, JSON.stringify({ timestamp: Date.now(), ...slim, zenVerification }));
   } catch {
     // best-effort; the cache is an optimization, never required
   }
@@ -1444,22 +1395,55 @@ function curatedModels() {
 // back to the curated entry. Without this, adding a key to the allowlist —
 // thinkingLevelMap was the case that exposed it — stayed invisible until the
 // cache aged out, because a whole cached model object replaced the curated one.
+// Curated entries missing from a stale cache must also come back: a cache saved
+// after a transient probe swing silently unregistered vouched models that are
+// still live on /v1/models (observed with muse-spark-1.2/1.3-contributor-free,
+// surfacing as "No models match pattern" for the settings' enabledModels
+// entries). Discovery-only entries stay as-is; duplicates are impossible since
+// a newly discovered id is by definition outside the curated allowlist.
 function mergeCachedList(cached, curated) {
   if (!Array.isArray(cached)) return curated;
-  const byId = new Map(curated.map((model) => [model.id, model]));
-  return cached.map((model) => {
-    const base = byId.get(model.id);
-    return base ? { ...base, ...model } : model;
+  const byId = new Map(cached.map((model) => [model.id, model]));
+  const merged = curated.map((model) => {
+    const cachedModel = byId.get(model.id);
+    return cachedModel ? { ...model, ...cachedModel } : model;
   });
+  const curatedIds = new Set(curated.map((model) => model.id));
+  for (const model of cached) {
+    if (!curatedIds.has(model.id)) merged.push(model);
+  }
+  return merged;
+}
+
+// Strict startup for Zen: show the last proven-free set, not the curated
+// wishlist. A curated id missing from the cache was dropped by a previous
+// free-only sweep and must not come back until it probes free again. No cache
+// means nothing is proven yet — the background verify fills it in.
+function mergeCachedStrict(cached, curated) {
+  if (!Array.isArray(cached)) return [];
+  const curatedById = new Map(curated.map((model) => [model.id, model]));
+  const merged = [];
+  for (const model of cached) {
+    const curatedModel = curatedById.get(model.id);
+    // Cached measured limits still win, but a code fix to effort mappings must
+    // not be overwritten by an older cached enum (e.g. Muse 1.3's removed none).
+    merged.push(curatedModel ? {
+      ...curatedModel, ...model,
+      ...(curatedModel.thinkingLevelMap ? { thinkingLevelMap: curatedModel.thinkingLevelMap } : {}),
+    } : model);
+  }
+  return merged;
 }
 
 function initialModels() {
   const cache = loadCache();
-  if (!cache) return curatedModels();
   const curated = curatedModels();
+  const verifiedZen = zenCacheIsVerified(cache) ? mergeCachedStrict(cache.zen, curated.zen) : [];
   return {
-    zen: mergeCachedList(cache.zen, curated.zen),
-    sensenova: mergeCachedList(cache.sensenova, curated.sensenova),
+    // If cache is empty or unverified, seed immediately with curated whitelist so
+    // models are instantly available on Pi launch/reload without waiting for background probe.
+    zen: verifiedZen.length > 0 ? verifiedZen : curated.zen,
+    sensenova: mergeCachedList(cache?.sensenova, curated.sensenova),
   };
 }
 
@@ -1541,13 +1525,15 @@ function registerAll(pi, m) {
     apiKey: "public",
     baseUrl: ZEN_BASE_URL,
     api: "openai-completions",
-    // Responses-API-only models carry api: "openai-responses", which pi routes
-    // through its own transport instead of streamSimple. Declare the OpenCode
-    // identity headers at provider level so that path is not treated as a
-    // generic client and rate-limited.
-    headers: { ...OPENCODE_STATIC_HEADERS },
+    // Pi routes Responses and Anthropic models through its native transports
+    // instead of streamSimple. They need the same OpenCode identity headers.
+    headers: openCodeHeaders(),
     streamSimple: streamOpenCode,
-    models: m.zen,
+    // Anthropic's SDK appends /v1/messages itself. Derive this on registration
+    // (not in cached metadata) so a changed relay URL cannot leave stale routes.
+    models: m.zen.map((model) => model.api === "anthropic-messages"
+      ? { ...model, baseUrl: ZEN_BASE_URL.replace(/\/v1$/, "") }
+      : model),
   });
   pi.registerProvider("sensenova", {
     name: "SenseNova (商汤日日新)",
@@ -1729,8 +1715,8 @@ function registerCapabilitiesCommand(pi) {
   });
 }
 
-// Background drift/probe pass. Best-effort: a failure leaves the already
-// registered (curated or cached) models untouched, so the user is never blocked.
+// Background drift/probe pass. Only successful free probes can become a new
+// verified Zen cache; catalog-fetch failures must not renew an older proof.
 async function verifyAndUpdateModels(pi) {
   // Overall safety net so a pathological network can never strand this task.
   // This must be threaded into every request. The budget has to cover the whole
@@ -1738,42 +1724,120 @@ async function verifyAndUpdateModels(pi) {
   // request per newly discovered model. 45s was tight enough that a slow round
   // could be cut off mid-sweep, which used to shrink the catalog; the pass runs
   // in the background, so a generous ceiling costs nothing.
-  const signal = AbortSignal.timeout(300000);
+  const signal = AbortSignal.timeout(180000);
   const zenHeaders = {
-    ...OPENCODE_STATIC_HEADERS,
+    ...openCodeHeaders(),
     ...authHeader("OPENCODE_API_KEY", "opencode-zen"),
   };
   const [zenLive, sensenovaModels] = await Promise.all([
     fetchLiveModelIdsResilient(`${ZEN_BASE_URL}/models`, zenHeaders, signal),
     filterToLive(SENSENOVA_MODELS, "https://token.sensenova.cn/v1/models", authHeader("SENSENOVA_API_KEY", "sensenova"), signal),
   ]);
-  const zenModels = zenLive ? await verifyZenModels(zenLive, signal) : ZEN_FREE_MODELS;
+  const zenModels = zenLive ? await verifyZenModels(zenLive, signal) : [];
   const verified = {
     zen: zenModels,
     sensenova: sensenovaModels,
   };
   registerAll(pi, verified);
-  // A timed-out pass leaves the effort maps/limits half-probed; writing that
-  // would overwrite a good cache with conservative fallback values. The already
-  // registered models are still useful for this session, so only skip the write.
-  if (!signal.aborted) saveCache(verified);
+  saveCache(verified, zenLive ? {
+    version: ZEN_VERIFICATION_VERSION, baseUrl: ZEN_BASE_URL, checkedAt: Date.now(),
+  } : null);
+}
+
+// Pi's built-in summarizer deliberately has no tools. Zen's free tier rejects
+// that request shape. Keep Pi's own cut points, prompts, token budgets and
+// summary validation, adding schemas only; tool_choice=none forbids execution.
+async function compactZenContext(event, ctx, thinkingLevel) {
+  const model = ctx.model;
+  if (model?.provider !== "opencode-zen") return;
+  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+  if (!auth.ok) throw new Error(auth.error);
+  const provider = ctx.modelRegistry.getProvider(model.provider);
+  if (!provider) throw new Error("OpenCode Zen provider is not registered");
+  const requestModel = auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model;
+  const tools = createCodingTools(ctx.cwd);
+  const stream = (target, context, options) => {
+    const messages = (context.messages ?? []).map((msg) => {
+      if (msg.role !== "user") return msg;
+      const text = typeof msg.content === "string"
+        ? msg.content
+        : Array.isArray(msg.content)
+          ? msg.content.map((c) => (c.type === "text" ? c.text : "")).join("")
+          : "";
+      const suffix = "\n\nCRITICAL: Do not invoke any tools. Do not output tool calls or tool-call markup. Output the summary in Markdown directly.";
+      return {
+        ...msg,
+        content: typeof msg.content === "string" ? text + suffix : [{ type: "text", text: text + suffix }],
+      };
+    });
+    const response = provider.streamSimple(target, {
+      ...context, tools, messages,
+      systemPrompt: `${context.systemPrompt ?? ""}\n\nAll tools are disabled for this text-only summary. Return the requested summary, never tool calls or tool-call markup.`,
+    }, {
+      ...options,
+      // Pi omits reasoning for off during compaction. Forward the selection
+      // explicitly so the custom chat adapter does not re-enable thinking.
+      reasoning: options?.reasoning ?? thinkingLevel,
+      headers: { ...options?.headers, ...openCodeHeaders() },
+      toolChoice: "none",
+    });
+    return {
+      [Symbol.asyncIterator]: () => response[Symbol.asyncIterator](),
+      result: async () => {
+        const reply = await response.result();
+        const text = reply.content.filter((part) => part.type === "text").map((part) => part.text).join("").trim();
+        // Some gateways leak a raw DeepSeek tool call as plain text despite
+        // tool_choice=none. Do not persist it as a successful checkpoint.
+        if (/^<(?:｜DSML｜|\|DSML\|)tool_calls>/.test(text)) {
+          return { ...reply, stopReason: "error", errorMessage: "Zen summarizer returned tool-call markup instead of a summary; original context was preserved." };
+        }
+        return reply;
+      },
+    };
+  };
+  return {
+    compaction: await compact(event.preparation, requestModel, auth.apiKey, auth.headers,
+      event.customInstructions, event.signal, thinkingLevel, stream, auth.env),
+  };
+}
+
+async function handleZenCompaction(event, ctx, thinkingLevel) {
+  try {
+    return await compactZenContext(event, ctx, thinkingLevel);
+  } catch (error) {
+    // Pi logs a thrown extension error and falls back to its tool-less request,
+    // masking the original failure as FreeTierError. Cancel instead, keeping
+    // the transcript intact and reporting the actual summary failure.
+    if (!event.signal?.aborted) {
+      ctx.ui.notify(`OpenCode Zen compaction failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+    }
+    return { cancel: true };
+  }
 }
 
 // ── Extension entry ──
 export default function (pi) {
-  // Register immediately with the curated allowlists (or a fresh on-disk cache)
-  // so Pi startup is never blocked on network model discovery. The live
-  // drift/probe pass runs in the background and hot-swaps the catalog without a
-  // /reload.
+  // Register immediately with the last proven-free cache (or empty when nothing
+  // is proven yet) so Pi startup is never blocked on network discovery. The
+  // live free-only pass runs in the background and hot-swaps the catalog
+  // without a /reload.
   const cache = loadCache();
   registerAll(pi, initialModels());
+  // Native Responses requests bypass streamOpenCode. Keep their identity
+  // complete at registration, then refresh the request id for each agent call.
+  pi.on("before_provider_headers", (event, ctx) => {
+    if (ctx.model?.provider !== "opencode-zen") return;
+    event.headers["x-opencode-session"] = SESSION_ID;
+    event.headers["x-opencode-request"] = generateOpenCodeId("msg_");
+  });
+  pi.on("session_before_compact", (event, ctx) => handleZenCompaction(event, ctx, pi.getThinkingLevel()));
   registerCapabilitiesCommand(pi);
   registerPricesCommand(pi);
   installUsageTracker(pi);
   registerUsageCommand(pi);
   // A recent sweep already answered the same questions, and re-probing every
   // Zen model eats the shared anonymous quota. `/model-refresh` forces one.
-  if (!cacheIsFresh(cache, OPENCODE_VERIFY_TTL)) {
+  if (!zenCacheIsVerified(cache)) {
     setTimeout(() => {
       verifyAndUpdateModels(pi).catch(() => {});
     }, 100);
